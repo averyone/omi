@@ -196,3 +196,4 @@ omiGlass/.expo
 /backend/logs/
 app/.fvm/
 app/android/.kotlin/
+app/google-credentials.json
