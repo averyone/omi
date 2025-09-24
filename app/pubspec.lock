@@ -293,10 +293,10 @@ packages:
     dependency: "direct main"
     description:
       name: connectivity_plus
-      sha256: b5e72753cf63becce2c61fd04dfe0f1c430cc5278b53a1342dc5ad839eab29ec
+      sha256: "33bae12a398f841c6cda09d1064212957265869104c478e5ad51e2fb26c3973c"
       url: "https://pub.dev"
     source: hosted
-    version: "6.1.5"
+    version: "7.0.0"
   connectivity_plus_platform_interface:
     dependency: transitive
     description:
@@ -634,10 +634,10 @@ packages:
     dependency: "direct main"
     description:
       name: flutter_background_service_android
-      sha256: b73d903056240e23a5c56d9e52d3a5d02ae41cb18b2988a97304ae37b2bae4bf
+      sha256: ca0793d4cd19f1e194a130918401a3d0b1076c81236f7273458ae96987944a87
       url: "https://pub.dev"
     source: hosted
-    version: "6.3.0"
+    version: "6.3.1"
   flutter_background_service_ios:
     dependency: transitive
     description:
@@ -825,10 +825,10 @@ packages:
     dependency: "direct main"
     description:
       name: flutter_web_auth_2
-      sha256: "2483d1fd3c45fe1262446e8d5f5490f01b864f2e7868ffe05b4727e263cc0182"
+      sha256: "9a9ac1b83b215ebc4926657f7d88b1d766ac66b1dd50d258b9f3ea31e627565e"
       url: "https://pub.dev"
     source: hosted
-    version: "5.0.0-alpha.3"
+    version: "5.0.0-alpha.4"
   flutter_web_auth_2_platform_interface:
     dependency: transitive
     description:
@@ -871,14 +871,22 @@ packages:
     description: flutter
     source: sdk
     version: "0.0.0"
+  geoclue:
+    dependency: transitive
+    description:
+      name: geoclue
+      sha256: c2a998c77474fc57aa00c6baa2928e58f4b267649057a1c76738656e9dbd2a7f
+      url: "https://pub.dev"
+    source: hosted
+    version: "0.1.1"
   geolocator:
     dependency: "direct main"
     description:
       name: geolocator
-      sha256: ee2212a3df8292ec4c90b91183b8001d3f5a800823c974b570c5f9344ca320dc
+      sha256: "79939537046c9025be47ec645f35c8090ecadb6fe98eba146a0d25e8c1357516"
       url: "https://pub.dev"
     source: hosted
-    version: "14.0.1"
+    version: "14.0.2"
   geolocator_android:
     dependency: transitive
     description:
@@ -895,6 +903,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "2.3.13"
+  geolocator_linux:
+    dependency: transitive
+    description:
+      name: geolocator_linux
+      sha256: c4e966f0a7a87e70049eac7a2617f9e16fd4c585a26e4330bdfc3a71e6a721f3
+      url: "https://pub.dev"
+    source: hosted
+    version: "0.2.3"
   geolocator_platform_interface:
     dependency: transitive
     description:
@@ -1015,6 +1031,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "3.9.2"
+  gsettings:
+    dependency: transitive
+    description:
+      name: gsettings
+      sha256: "1b0ce661f5436d2db1e51f3c4295a49849f03d304003a7ba177d01e3a858249c"
+      url: "https://pub.dev"
+    source: hosted
+    version: "0.2.8"
   gtk:
     dependency: transitive
     description:
@@ -1083,10 +1107,10 @@ packages:
     dependency: transitive
     description:
       name: image_picker_android
-      sha256: a45bef33deb24839a51fb85a4d9e504ead2b1ad1c4779d02d09bf6a8857cdd52
+      sha256: "8dfe08ea7fcf7467dbaf6889e72eebd5e0d6711caae201fdac780eb45232cd02"
       url: "https://pub.dev"
     source: hosted
-    version: "0.8.13+2"
+    version: "0.8.13+3"
   image_picker_for_web:
     dependency: transitive
     description:
@@ -1192,18 +1216,18 @@ packages:
     dependency: transitive
     description:
       name: intercom_flutter_web
-      sha256: "41679dafe6f2e69cd58a27e62cfd9c54b1b150445b442418ed411cd80d0a467a"
+      sha256: e44edc8a5f660c91ce2dcb5af2743622765f1742c72e790f44cf9b6752f2d90e
       url: "https://pub.dev"
     source: hosted
-    version: "1.1.8"
+    version: "1.1.9"
   internet_connection_checker_plus:
     dependency: "direct main"
     description:
       name: internet_connection_checker_plus
-      sha256: "5aea4a1ee0fcca736980a7d04d96fe8c0b53dea330690053305a5c5392230112"
+      sha256: f0a1a9f336e9fb093f30e6cfd8915ad98243f171be5863824a19e658b13c1a9d
       url: "https://pub.dev"
     source: hosted
-    version: "2.7.2"
+    version: "2.8.0"
   intl:
     dependency: "direct main"
     description:
@@ -1691,10 +1715,10 @@ packages:
     dependency: transitive
     description:
       name: pool
-      sha256: "20fe868b6314b322ea036ba325e6fc0711a22948856475e2c2b6306e8ab39c2a"
+      sha256: "978783255c543aa3586a1b3c21f6e9d720eb315376a915872c61ef8b5c20177d"
       url: "https://pub.dev"
     source: hosted
-    version: "1.5.1"
+    version: "1.5.2"
   process:
     dependency: transitive
     description:
@@ -1803,10 +1827,10 @@ packages:
     dependency: transitive
     description:
       name: shared_preferences_android
-      sha256: a2608114b1ffdcbc9c120eb71a0e207c71da56202852d4aab8a5e30a82269e74
+      sha256: bd14436108211b0d4ee5038689a56d4ae3620fd72fd6036e113bf1345bc74d9e
       url: "https://pub.dev"
     source: hosted
-    version: "2.4.12"
+    version: "2.4.13"
   shared_preferences_foundation:
     dependency: transitive
     description:
@@ -1899,10 +1923,10 @@ packages:
     dependency: "direct main"
     description:
       name: skeletonizer
-      sha256: a9ddf63900947f4c0648372b6e9987bc2b028db9db843376db6767224d166c31
+      sha256: eebc03dc86b298e2d7f61e0ebce5713e9dbbc3e786f825909b4591756f196eb6
       url: "https://pub.dev"
     source: hosted
-    version: "2.0.1"
+    version: "2.1.0+1"
   sky_engine:
     dependency: transitive
     description: flutter
@@ -2040,10 +2064,10 @@ packages:
     dependency: transitive
     description:
       name: talker
-      sha256: "2d742b54e5cda58b7d386cd2d95088c3429ef273b2a0869dec552fe02601367a"
+      sha256: f86b1de9e2442228c9340b418703b4ee10d0f831bf3571696ba1d835293ad22a
       url: "https://pub.dev"
     source: hosted
-    version: "5.0.0"
+    version: "5.0.1"
   talker_flutter:
     dependency: "direct main"
     description:
@@ -2056,10 +2080,10 @@ packages:
     dependency: transitive
     description:
       name: talker_logger
-      sha256: "4f06d46db664c11cf4d629378da661f2c75aee629e3ef898dbc3cf44a0c41cd7"
+      sha256: "8c63990d33e779a24368e0c191e6c9a54639088b6fe3a5b763a6f37fe00ff20b"
       url: "https://pub.dev"
     source: hosted
-    version: "5.0.0"
+    version: "5.0.1"
   term_glyph:
     dependency: transitive
     description:
@@ -2144,10 +2168,10 @@ packages:
     dependency: transitive
     description:
       name: url_launcher_android
-      sha256: "07cffecb7d68cbc6437cd803d5f11a86fe06736735c3dfe46ff73bcb0f958eed"
+      sha256: "199bc33e746088546a39cc5f36bac5a278c5e53b40cb3196f99e7345fdcfae6b"
       url: "https://pub.dev"
     source: hosted
-    version: "6.3.21"
+    version: "6.3.22"
   url_launcher_ios:
     dependency: transitive
     description:
@@ -2384,10 +2408,10 @@ packages:
     dependency: transitive
     description:
       name: webview_flutter_wkwebview
-      sha256: fb46db8216131a3e55bcf44040ca808423539bc6732e7ed34fb6d8044e3d512f
+      sha256: fea63576b3b7e02b2df8b78ba92b48ed66caec2bb041e9a0b1cbd586d5d80bfd
       url: "https://pub.dev"
     source: hosted
-    version: "3.23.0"
+    version: "3.23.1"
   win32:
     dependency: transitive
     description:
