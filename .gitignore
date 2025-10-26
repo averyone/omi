@@ -103,6 +103,10 @@ dist/
 *.tmp
 hs_err_pid*
 
+#google keys
+backend/google-credentials.json
+
+
 # Servers
 src/recordings
 
@@ -196,4 +200,3 @@ omiGlass/.expo
 /backend/logs/
 app/.fvm/
 app/android/.kotlin/
-app/google-credentials.json
