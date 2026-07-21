@@ -1,0 +1,45 @@
+# LiteLLM proxy config: maps the OpenAI model names hardcoded in the backend
+# to local models served by oMLX on the host (OpenAI-compatible, port 1235).
+# OMLX_API_KEY is injected via the environment (see docker-compose.yml); never commit the key.
+
+model_list:
+  - model_name: gpt-4o
+    litellm_params:
+      model: openai/Qwen3-235B-A22B-8bit
+      api_base: http://host.docker.internal:1235/v1
+      api_key: os.environ/OMLX_API_KEY
+  - model_name: gpt-4.1
+    litellm_params:
+      model: openai/Qwen3-235B-A22B-8bit
+      api_base: http://host.docker.internal:1235/v1
+      api_key: os.environ/OMLX_API_KEY
+  - model_name: gpt-4o-mini
+    litellm_params:
+      # Devstral chosen for the fast tier: reliably emits schema-conformant tool calls
+      # (5/5 on classifier prompts) where Qwen3-4B and gemma-3-27b returned prose (0/5).
+      model: openai/Devstral-Small-2-24B-Instruct-2512-4bit
+      api_base: http://host.docker.internal:1235/v1
+      api_key: os.environ/OMLX_API_KEY
+  - model_name: o4-mini
+    litellm_params:
+      # Devstral chosen for the fast tier: reliably emits schema-conformant tool calls
+      # (5/5 on classifier prompts) where Qwen3-4B and gemma-3-27b returned prose (0/5).
+      model: openai/Devstral-Small-2-24B-Instruct-2512-4bit
+      api_base: http://host.docker.internal:1235/v1
+      api_key: os.environ/OMLX_API_KEY
+  - model_name: text-embedding-3-large
+    litellm_params:
+      model: openai/nomicai-modernbert-embed-base-bf16
+      api_base: http://host.docker.internal:1235/v1
+      api_key: os.environ/OMLX_API_KEY
+    model_info:
+      mode: embedding
+
+litellm_settings:
+  drop_params: true          # drop OpenAI-only params local models reject
+  request_timeout: 600       # covers first-request model load (235B from SSD can take minutes)
+  num_retries: 0             # don't silently re-run slow local generations
+
+router_settings:
+  allowed_fails: 100         # single deployment per alias — a cooldown would blackhole
+  cooldown_time: 0           #   the model name after a couple of slow-inference timeouts

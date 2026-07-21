@@ -14,7 +14,32 @@ services:
       # Secrets stay out of the image (see /.dockerignore) and are mounted at runtime
       - ./google-credentials.json:/app/google-credentials.json:ro
     depends_on:
-      - redis
+      redis:
+        condition: service_started
+      litellm:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Maps the OpenAI model names hardcoded in the code to local oMLX models (see litellm/config.yaml).
+  # The backend reaches it via OPENAI_BASE_URL=http://litellm:4000/v1 in .env.
+  litellm:
+    image: ghcr.io/berriai/litellm:main-v1.77.7-stable
+    container_name: omi-litellm
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    environment:
+      OMLX_API_KEY: ${OMLX_API_KEY}
+    volumes:
+      - ./litellm/config.yaml:/app/config.yaml:ro
+    ports:
+      - "127.0.0.1:4000:4000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:4000/health/liveliness')"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
     restart: unless-stopped
 
   # Local stand-in for Upstash (the original hosted instance no longer exists).

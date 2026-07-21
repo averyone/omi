@@ -36,6 +36,7 @@ from utils.llm.chat import (
     select_structured_filters,
     extract_question_from_conversation,
 )
+from utils.llm.clients import EMBEDDING_DIMENSION
 from utils.llm.persona import answer_persona_question_stream
 from utils.other.chat_file import FileChatTool
 from utils.other.endpoints import timeit
@@ -286,7 +287,7 @@ def query_vectors(state: GraphState):
     # )
 
     # Use [1] * dimension to trigger the score distance to fetch all vectors by meta filters
-    vector = [1] * 3072
+    vector = [1] * EMBEDDING_DIMENSION
     print("query_vectors vector:", vector[:5])
 
     # TODO: enable it when the in-accurate topic filter get fixed

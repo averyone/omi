@@ -33,7 +33,14 @@ llm_persona_medium_stream = ChatOpenAI(
     default_headers={"X-Title": "Omi Chat"},
     streaming=True,
 )
-embeddings = OpenAIEmbeddings(model="text-embedding-3-large")
+# When routed to an OpenAI-compatible endpoint (OPENAI_BASE_URL), send plain strings:
+# local servers reject the tokenized-input format langchain sends to api.openai.com by default.
+embeddings = OpenAIEmbeddings(
+    model="text-embedding-3-large",
+    check_embedding_ctx_length=os.getenv('OPENAI_BASE_URL') is None,
+)
+# Vector size produced by the embedding model above; must match the Pinecone index dimension.
+EMBEDDING_DIMENSION = int(os.getenv('EMBEDDING_DIMENSION', '3072'))
 parser = PydanticOutputParser(pydantic_object=Structured)
 
 encoding = tiktoken.encoding_for_model('gpt-4')

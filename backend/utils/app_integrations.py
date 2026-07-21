@@ -16,7 +16,7 @@ from models.conversation import Conversation, ConversationSource
 from models.notification_message import NotificationMessage
 from utils.apps import get_available_apps
 from utils.notifications import send_notification
-from utils.llm.clients import generate_embedding
+from utils.llm.clients import generate_embedding, EMBEDDING_DIMENSION
 from utils.llm.proactive_notification import get_proactive_message
 from database.vector_db import query_vectors_by_metadata
 import database.conversations as conversations_db
@@ -160,7 +160,11 @@ async def trigger_realtime_audio_bytes(uid: str, sample_rate: int, data: bytearr
 
 # proactive notification
 def _retrieve_contextual_memories(uid: str, user_context):
-    vector = generate_embedding(user_context.get('question', '')) if user_context.get('question') else [0] * 3072
+    vector = (
+        generate_embedding(user_context.get('question', ''))
+        if user_context.get('question')
+        else [0] * EMBEDDING_DIMENSION
+    )
     print("query_vectors vector:", vector[:5])
 
     date_filters = {}  # not support yet
