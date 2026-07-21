@@ -1,0 +1,31 @@
+services:
+  backend:
+    build:
+      # Dockerfile copies backend/ from the repo root, so context is one level up
+      context: ..
+      dockerfile: backend/Dockerfile
+    image: omi-backend
+    container_name: omi-backend
+    ports:
+      # Host 8000 to match the docs (ngrok/app expect port 8000); container serves on 8080
+      - "8000:8080"
+    env_file: .env
+    volumes:
+      # Secrets stay out of the image (see /.dockerignore) and are mounted at runtime
+      - ./google-credentials.json:/app/google-credentials.json:ro
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  # Local stand-in for Upstash (the original hosted instance no longer exists).
+  # Password must match REDIS_DB_PASSWORD in .env.
+  redis:
+    image: redis:7-alpine
+    container_name: omi-redis
+    command: redis-server --requirepass omi-local-dev
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+
+volumes:
+  redis-data:

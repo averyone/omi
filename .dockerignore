@@ -1,0 +1,12 @@
+# Backend image only needs backend/ — exclude everything else from the build context
+*
+!backend
+
+# Keep secrets out of image layers; they are mounted at runtime instead
+backend/.env
+backend/google-credentials.json
+
+# Local artifacts not needed in the image
+backend/.venv
+backend/_temp
+backend/__pycache__
