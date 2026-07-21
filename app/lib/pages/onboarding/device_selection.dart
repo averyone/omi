@@ -1,8 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:omi/pages/onboarding/wrapper.dart';
-import 'package:omi/utils/other/temp.dart';
+
 import 'package:video_player/video_player.dart';
+
+import 'package:omi/pages/onboarding/wrapper.dart';
+import 'package:omi/utils/l10n_extensions.dart';
+import 'package:omi/utils/other/temp.dart';
 
 class DeviceSelectionPage extends StatefulWidget {
   const DeviceSelectionPage({super.key});
@@ -21,18 +24,12 @@ class _DeviceSelectionPageState extends State<DeviceSelectionPage> with SingleTi
   @override
   void initState() {
     super.initState();
-    _controller = AnimationController(
-      duration: const Duration(milliseconds: 600),
-      vsync: this,
-    )..repeat(reverse: true);
+    _controller = AnimationController(duration: const Duration(milliseconds: 600), vsync: this)..repeat(reverse: true);
 
     _arrowAnimation = Tween<double>(
       begin: 0,
       end: 4,
-    ).animate(CurvedAnimation(
-      parent: _controller,
-      curve: Curves.easeInOut,
-    ));
+    ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeInOut));
 
     _initializeVideo();
   }
@@ -98,9 +95,7 @@ class _DeviceSelectionPageState extends State<DeviceSelectionPage> with SingleTi
                               child: VideoPlayer(_videoController),
                             ),
                           )
-                        : Container(
-                            color: Colors.white,
-                          ),
+                        : Container(color: Colors.white),
                   ),
                 ),
 
@@ -110,10 +105,7 @@ class _DeviceSelectionPageState extends State<DeviceSelectionPage> with SingleTi
                   padding: EdgeInsets.fromLTRB(32, 24, 32, 20),
                   decoration: const BoxDecoration(
                     color: Colors.white,
-                    borderRadius: BorderRadius.only(
-                      topLeft: Radius.circular(40),
-                      topRight: Radius.circular(40),
-                    ),
+                    borderRadius: BorderRadius.only(topLeft: Radius.circular(40), topRight: Radius.circular(40)),
                   ),
                   child: SafeArea(
                     top: false,
@@ -121,9 +113,9 @@ class _DeviceSelectionPageState extends State<DeviceSelectionPage> with SingleTi
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         // Title and subtitle
-                        const Text(
-                          'Omi – Your AI Companion',
-                          style: TextStyle(
+                        Text(
+                          context.l10n.omiYourAiCompanion,
+                          style: const TextStyle(
                             color: Colors.black,
                             fontSize: 34,
                             fontWeight: FontWeight.bold,
@@ -134,9 +126,9 @@ class _DeviceSelectionPageState extends State<DeviceSelectionPage> with SingleTi
                         ),
                         const SizedBox(height: 12),
                         Text(
-                          'Capture every moment. Get AI-powered\nsummaries. Never take notes again.',
+                          context.l10n.captureEveryMoment,
                           style: TextStyle(
-                            color: Colors.black.withOpacity(0.7),
+                            color: Colors.black.withValues(alpha: 0.7),
                             fontSize: 16,
                             height: 1.4,
                             fontFamily: 'Manrope',
@@ -160,16 +152,14 @@ class _DeviceSelectionPageState extends State<DeviceSelectionPage> with SingleTi
                             style: ElevatedButton.styleFrom(
                               backgroundColor: Colors.black,
                               foregroundColor: Colors.white,
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(28),
-                              ),
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
                             ),
                             child: Row(
                               mainAxisAlignment: MainAxisAlignment.center,
                               children: [
-                                const Text(
-                                  'Get Started',
-                                  style: TextStyle(
+                                Text(
+                                  context.l10n.getStarted,
+                                  style: const TextStyle(
                                     fontSize: 18,
                                     fontWeight: FontWeight.w600,
                                     fontFamily: 'Manrope',
@@ -207,7 +197,7 @@ class _DeviceSelectionPageState extends State<DeviceSelectionPage> with SingleTi
                   child: CircularProgressIndicator(
                     value: _videoProgress,
                     strokeWidth: 2,
-                    backgroundColor: Colors.grey.withOpacity(0.3),
+                    backgroundColor: Colors.grey.withValues(alpha: 0.3),
                     valueColor: AlwaysStoppedAnimation<Color>(Colors.grey[700]!),
                   ),
                 ),

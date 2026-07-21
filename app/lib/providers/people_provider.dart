@@ -1,10 +1,10 @@
-import 'package:flutter/cupertino.dart';
-import 'package:omi/backend/http/api/speech_profile.dart';
+import 'package:just_audio/just_audio.dart';
+
 import 'package:omi/backend/http/api/users.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/person.dart';
 import 'package:omi/providers/base_provider.dart';
-import 'package:just_audio/just_audio.dart';
+import 'package:omi/utils/logger.dart';
 
 class PeopleProvider extends BaseProvider {
   List<Person> people = SharedPreferencesUtil().cachedPeople;
@@ -22,12 +22,22 @@ class PeopleProvider extends BaseProvider {
     _setupAudioPlayerListeners();
   }
 
+  void clearUserData() {
+    people = [];
+    samplesUrl = {};
+    currentPlayingPersonIndex = null;
+    currentPlayingIndex = null;
+    isPlaying = false;
+    _audioPlayer.stop();
+    notifyListeners();
+  }
+
   setPeople() async {
     final value = await getAllPeople();
     loading = false;
     people = value;
     SharedPreferencesUtil().cachedPeople = people;
-    debugPrint("${SharedPreferencesUtil().cachedPeople.length} people");
+    Logger.debug("${SharedPreferencesUtil().cachedPeople.length} people");
     notifyListeners();
   }
 
@@ -106,21 +116,17 @@ class PeopleProvider extends BaseProvider {
     notifyListeners();
   }
 
-  String _getFileNameFromUrl(String url) {
-    Uri uri = Uri.parse(url);
-    String fileName = uri.pathSegments.last;
-    return fileName.split('.').first;
-  }
+  Future<void> deletePersonSample(int personIdx, int sampleIdx) async {
+    String personId = people[personIdx].id;
 
-  void deletePersonSample(int personIdx, String url) {
-    String name = _getFileNameFromUrl(url);
-    var parts = name.split('_segment_');
-    String conversationId = parts[0];
-    int segmentIdx = int.parse(parts[1]);
-    deleteProfileSample(conversationId, segmentIdx, personId: people[personIdx].id);
-    people[personIdx].speechSamples!.remove(url);
-    SharedPreferencesUtil().replaceCachedPerson(people[personIdx]);
-    notifyListeners();
+    bool success = await deletePersonSpeechSample(personId, sampleIdx);
+    if (success) {
+      people[personIdx].speechSamples!.removeAt(sampleIdx);
+      SharedPreferencesUtil().replaceCachedPerson(people[personIdx]);
+      notifyListeners();
+    } else {
+      Logger.debug('Failed to delete speech sample at index: $sampleIdx');
+    }
   }
 
   void deletePersonProvider(Person person) {

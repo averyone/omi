@@ -1,54 +1,21 @@
-class ActionItemWithMetadata {
-  final String id;
-  final String description;
-  final bool completed;
-  final DateTime? createdAt;
-  final DateTime? updatedAt;
-  final DateTime? dueAt;
-  final DateTime? completedAt;
-  final String? conversationId;
-  final bool isLocked;
+import 'package:omi/backend/schema/gen/action_items_folders_wire.g.dart' as wire;
 
-  ActionItemWithMetadata({
-    required this.id,
-    required this.description,
-    required this.completed,
-    this.createdAt,
-    this.updatedAt,
-    this.dueAt,
-    this.completedAt,
-    this.conversationId,
-    this.isLocked = false,
-  });
+// Phase 4.1 — pure 1:1 thin wrappers over generated wire types.
+//
+// Every field (including nullability) matches the generated type exactly, and the
+// only extra surface was a fromGenerated/toGenerated/fromJson/toJson passthrough and
+// an unused copyWith. They are deleted in favour of typedefs; GeneratedX.fromJson
+// already provides JSON decoding and GeneratedX.toJson provides serialization.
 
-  factory ActionItemWithMetadata.fromJson(Map<String, dynamic> json) {
-    return ActionItemWithMetadata(
-      id: json['id'],
-      description: json['description'],
-      completed: json['completed'] ?? false,
-      createdAt: json['created_at'] != null ? DateTime.parse(json['created_at']) : null,
-      updatedAt: json['updated_at'] != null ? DateTime.parse(json['updated_at']) : null,
-      dueAt: json['due_at'] != null ? DateTime.parse(json['due_at']) : null,
-      completedAt: json['completed_at'] != null ? DateTime.parse(json['completed_at']) : null,
-      conversationId: json['conversation_id'],
-      isLocked: json['is_locked'] ?? false,
-    );
-  }
+typedef ActionItemWithMetadata = wire.GeneratedActionItemResponse;
+typedef ActionItemsResponse = wire.GeneratedActionItemsResponse;
+typedef PendingSyncResponse = wire.GeneratedPendingSyncResponse;
 
-  Map<String, dynamic> toJson() {
-    return {
-      'id': id,
-      'description': description,
-      'completed': completed,
-      'created_at': createdAt?.toIso8601String(),
-      'updated_at': updatedAt?.toIso8601String(),
-      'due_at': dueAt?.toIso8601String(),
-      'completed_at': completedAt?.toIso8601String(),
-      'conversation_id': conversationId,
-      'is_locked': isLocked,
-    };
-  }
+const Object _actionItemCopyWithUnset = Object();
 
+/// copyWith for [ActionItemWithMetadata]; preserved from the deleted hand-written
+/// class because the provider mutates items in place via this method.
+extension ActionItemWithMetadataCopyWith on wire.GeneratedActionItemResponse {
   ActionItemWithMetadata copyWith({
     String? id,
     String? description,
@@ -59,8 +26,26 @@ class ActionItemWithMetadata {
     DateTime? completedAt,
     String? conversationId,
     bool? isLocked,
+    bool? exported,
+    DateTime? exportDate,
+    String? exportPlatform,
+    String? appleReminderId,
+    int? sortOrder,
+    int? indentLevel,
+    double? dueConfidence,
+    Object? goalId = _actionItemCopyWithUnset,
+    Object? workstreamId = _actionItemCopyWithUnset,
+    String? owner,
+    String? source,
+    String? status,
+    String? priority,
+    List<wire.GeneratedEvidenceRef>? provenance,
+    String? recurrenceRule,
+    String? recurrenceParentId,
+    String? supersededBy,
+    String? taskId,
   }) {
-    return ActionItemWithMetadata(
+    return wire.GeneratedActionItemResponse(
       id: id ?? this.id,
       description: description ?? this.description,
       completed: completed ?? this.completed,
@@ -70,24 +55,24 @@ class ActionItemWithMetadata {
       completedAt: completedAt ?? this.completedAt,
       conversationId: conversationId ?? this.conversationId,
       isLocked: isLocked ?? this.isLocked,
-    );
-  }
-}
-
-class ActionItemsResponse {
-  final List<ActionItemWithMetadata> actionItems;
-  final bool hasMore;
-
-  ActionItemsResponse({
-    required this.actionItems,
-    required this.hasMore,
-  });
-
-  factory ActionItemsResponse.fromJson(Map<String, dynamic> json) {
-    return ActionItemsResponse(
-      actionItems:
-          (json['action_items'] as List<dynamic>).map((item) => ActionItemWithMetadata.fromJson(item)).toList(),
-      hasMore: json['has_more'],
+      exported: exported ?? this.exported,
+      exportDate: exportDate ?? this.exportDate,
+      exportPlatform: exportPlatform ?? this.exportPlatform,
+      appleReminderId: appleReminderId ?? this.appleReminderId,
+      sortOrder: sortOrder ?? this.sortOrder,
+      indentLevel: indentLevel ?? this.indentLevel,
+      dueConfidence: dueConfidence ?? this.dueConfidence,
+      goalId: identical(goalId, _actionItemCopyWithUnset) ? this.goalId : goalId as String?,
+      workstreamId: identical(workstreamId, _actionItemCopyWithUnset) ? this.workstreamId : workstreamId as String?,
+      owner: owner ?? this.owner,
+      source: source ?? this.source,
+      status: status ?? this.status,
+      priority: priority ?? this.priority,
+      provenance: provenance ?? this.provenance,
+      recurrenceRule: recurrenceRule ?? this.recurrenceRule,
+      recurrenceParentId: recurrenceParentId ?? this.recurrenceParentId,
+      supersededBy: supersededBy ?? this.supersededBy,
+      taskId: taskId ?? this.taskId,
     );
   }
 }

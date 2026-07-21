@@ -2,15 +2,52 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
+
 import 'package:flutter/foundation.dart';
+
 import 'package:flutter_sound/flutter_sound.dart';
-import 'package:omi/backend/schema/bt_device/bt_device.dart';
-import 'package:omi/services/wals.dart';
 import 'package:opus_dart/opus_dart.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 
+import 'package:omi/backend/schema/bt_device/bt_device.dart';
+import 'package:omi/app_globals.dart';
+import 'package:omi/services/wals.dart';
+import 'package:omi/utils/alerts/app_snackbar.dart';
+import 'package:omi/utils/l10n_extensions.dart';
+import 'package:omi/utils/logger.dart';
+
+/// Parse length-prefixed binary frames: [4-byte LE uint32 length][payload] per frame.
+/// Used by both Opus and PCM WAL binary files.
+@visibleForTesting
+List<Uint8List> parseLengthPrefixedFrames(Uint8List data) {
+  List<Uint8List> frames = [];
+  int offset = 0;
+
+  while (offset < data.length - 4) {
+    final lengthBytes = data.sublist(offset, offset + 4);
+    final length = ByteData.sublistView(Uint8List.fromList(lengthBytes)).getUint32(0, Endian.little);
+    offset += 4;
+
+    if (offset + length > data.length) break;
+
+    final frameData = data.sublist(offset, offset + length);
+    frames.add(Uint8List.fromList(frameData));
+    offset += length;
+  }
+
+  return frames;
+}
+
 class AudioPlayerUtils extends ChangeNotifier {
+  // Singleton pattern
+  static final AudioPlayerUtils _instance = AudioPlayerUtils._internal();
+  static AudioPlayerUtils get instance => _instance;
+
+  factory AudioPlayerUtils() => _instance;
+
+  AudioPlayerUtils._internal();
+
   FlutterSoundPlayer? _audioPlayer;
   String? _currentPlayingId;
   bool _isProcessingAudio = false;
@@ -32,18 +69,25 @@ class AudioPlayerUtils extends ChangeNotifier {
     return progress.clamp(0.0, 1.0);
   }
 
-  AudioPlayerUtils() {
-    _initializeAudioPlayer();
-  }
+  /// Lazily initialize the audio player only when needed
+  Future<void> _ensurePlayerInitialized() async {
+    if (_audioPlayer != null) return;
 
-  void _initializeAudioPlayer() async {
     _audioPlayer = FlutterSoundPlayer();
-    await _audioPlayer?.openPlayer();
+
+    if (_audioPlayer != null && !_audioPlayer!.isOpen()) {
+      await _audioPlayer!.openPlayer();
+      // onProgress emits nothing unless a subscription interval is set (default 0ms).
+      await _audioPlayer!.setSubscriptionDuration(const Duration(milliseconds: 100));
+    }
   }
 
   bool isPlaying(String id) => _currentPlayingId == id;
 
   bool canPlayOrShare(Wal wal) {
+    if (wal.storage == WalStorage.sdcard && wal.fileNum == -1) {
+      return false;
+    }
     return (wal.filePath != null && wal.filePath!.isNotEmpty) ||
         wal.data.isNotEmpty ||
         wal.storage == WalStorage.sdcard;
@@ -51,7 +95,11 @@ class AudioPlayerUtils extends ChangeNotifier {
 
   Future<void> togglePlayback(Wal wal) async {
     if (!canPlayOrShare(wal)) {
-      throw Exception('Audio file not available for playback');
+      Logger.error('AudioPlayerUtils: Audio file not available for playback, WAL ${wal.id}');
+      AppSnackbar.showSnackbarError(
+        globalNavigatorKey.currentContext?.l10n.audioPlaybackUnavailable ?? 'Audio file is not available for playback',
+      );
+      return;
     }
 
     if (_isProcessingAudio) return;
@@ -79,25 +127,30 @@ class AudioPlayerUtils extends ChangeNotifier {
     _totalDuration = Duration.zero;
     notifyListeners();
 
+    // Initialize player lazily on first use
+    await _ensurePlayerInitialized();
+
     final audioFilePath = await _getOrCreateAudioFile(wal);
     if (audioFilePath == null) {
       _resetPlaybackState();
-      throw Exception('Unable to create playable audio file');
+      Logger.error('AudioPlayerUtils: Unable to create playable audio file for WAL ${wal.id}');
+      AppSnackbar.showSnackbarError(
+        globalNavigatorKey.currentContext?.l10n.audioPlaybackFailed ??
+            'Unable to play audio. The file may be corrupted or missing.',
+      );
+      return;
     }
 
     _currentPlayingId = wal.id;
     _isProcessingAudio = false;
 
-    await _audioPlayer?.startPlayer(
-      fromURI: audioFilePath,
-      whenFinished: () => _onPlaybackFinished(),
-    );
+    await _audioPlayer?.startPlayer(fromURI: audioFilePath, whenFinished: () => _onPlaybackFinished());
 
     _setupPositionTracking(wal);
   }
 
   void _onPlaybackFinished() {
-    debugPrint('Audio playback finished');
+    Logger.debug('Audio playback finished');
     _resetPlaybackState();
   }
 
@@ -156,7 +209,7 @@ class AudioPlayerUtils extends ChangeNotifier {
     );
 
     if (result.status == ShareResultStatus.success) {
-      debugPrint('Audio file shared successfully');
+      Logger.debug('Audio file shared successfully');
     }
   }
 
@@ -167,6 +220,15 @@ class AudioPlayerUtils extends ChangeNotifier {
       final cachedPath = _audioFileCache[cacheKey]!;
       if (File(cachedPath).existsSync()) {
         return cachedPath;
+      }
+    }
+
+    // Sharing reuses the already-decoded playback file (e.g. the one produced when
+    // the waveform loaded) instead of decoding the whole recording again.
+    if (forSharing) {
+      final playbackCached = _audioFileCache[wal.id];
+      if (playbackCached != null && File(playbackCached).existsSync()) {
+        return playbackCached;
       }
     }
 
@@ -209,7 +271,7 @@ class AudioPlayerUtils extends ChangeNotifier {
 
     List<int> data = [];
     for (int i = 0; i < wal.data.length; i++) {
-      var frame = wal.data[i].sublist(3);
+      var frame = wal.data[i];
       final byteFrame = ByteData(frame.length);
       for (int j = 0; j < frame.length; j++) {
         byteFrame.setUint8(j, frame[j]);
@@ -228,34 +290,19 @@ class AudioPlayerUtils extends ChangeNotifier {
     if (!file.existsSync()) return null;
 
     final opusData = await file.readAsBytes();
-    List<Uint8List> opusFrames = [];
-    int offset = 0;
-
-    while (offset < opusData.length - 4) {
-      final lengthBytes = opusData.sublist(offset, offset + 4);
-      final length = ByteData.sublistView(Uint8List.fromList(lengthBytes)).getUint32(0, Endian.little);
-      offset += 4;
-
-      if (offset + length > opusData.length) break;
-
-      final frameData = opusData.sublist(offset, offset + length);
-      opusFrames.add(Uint8List.fromList(frameData));
-      offset += length;
-    }
+    final opusFrames = parseLengthPrefixedFrames(opusData);
 
     if (opusFrames.isEmpty) return null;
 
-    final decoder = SimpleOpusDecoder(
-      sampleRate: wal.sampleRate,
-      channels: wal.channel,
-    );
+    final decoder = SimpleOpusDecoder(sampleRate: wal.sampleRate, channels: wal.channel);
 
     List<Uint8List> pcmFrames = [];
     for (final opusFrame in opusFrames) {
-      final pcmFrame = decoder.decode(input: opusFrame);
-      if (pcmFrame != null) {
-        final uint8Frame = Uint8List.fromList(pcmFrame.buffer.asUint8List());
-        pcmFrames.add(uint8Frame);
+      try {
+        final pcmFrame = decoder.decode(input: opusFrame);
+        pcmFrames.add(Uint8List.fromList(pcmFrame.buffer.asUint8List()));
+      } catch (e) {
+        Logger.warning('AudioPlayerUtils: skipping corrupted Opus frame for WAL ${wal.id}: $e');
       }
     }
 
@@ -269,12 +316,7 @@ class AudioPlayerUtils extends ChangeNotifier {
       writeOffset += frame.length;
     }
 
-    return await _createWavFile(
-      pcmData: combinedPcm,
-      wal: wal,
-      bitsPerSample: 16,
-      forSharing: forSharing,
-    );
+    return await _createWavFile(pcmData: combinedPcm, wal: wal, bitsPerSample: 16, forSharing: forSharing);
   }
 
   Future<String?> _convertPcmToWav(Wal wal, String pcmFilePath, {bool forSharing = false}) async {
@@ -282,20 +324,7 @@ class AudioPlayerUtils extends ChangeNotifier {
     if (!file.existsSync()) return null;
 
     final pcmFileData = await file.readAsBytes();
-    List<Uint8List> pcmFrames = [];
-    int offset = 0;
-
-    while (offset < pcmFileData.length - 4) {
-      final lengthBytes = pcmFileData.sublist(offset, offset + 4);
-      final length = ByteData.sublistView(pcmFileData, offset + 4, offset + 8).getUint32(0, Endian.little);
-      offset += 4;
-
-      if (offset + length > pcmFileData.length) break;
-
-      final frameData = pcmFileData.sublist(offset, offset + length);
-      pcmFrames.add(Uint8List.fromList(frameData));
-      offset += length;
-    }
+    final pcmFrames = parseLengthPrefixedFrames(pcmFileData);
 
     if (pcmFrames.isEmpty) return null;
 
@@ -308,12 +337,7 @@ class AudioPlayerUtils extends ChangeNotifier {
     }
 
     final bitsPerSample = wal.codec == BleAudioCodec.pcm16 ? 16 : 8;
-    return await _createWavFile(
-      pcmData: combinedPcm,
-      wal: wal,
-      bitsPerSample: bitsPerSample,
-      forSharing: forSharing,
-    );
+    return await _createWavFile(pcmData: combinedPcm, wal: wal, bitsPerSample: bitsPerSample, forSharing: forSharing);
   }
 
   Future<String> _createWavFile({

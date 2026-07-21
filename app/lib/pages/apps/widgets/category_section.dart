@@ -1,13 +1,17 @@
-import 'package:cached_network_image/cached_network_image.dart';
+import 'dart:math';
+
+import 'package:omi/utils/platform/platform_manager.dart';
 import 'package:flutter/material.dart';
+
+import 'package:cached_network_image/cached_network_image.dart';
+import 'package:provider/provider.dart';
+
 import 'package:omi/backend/schema/app.dart';
 import 'package:omi/pages/apps/app_detail/app_detail.dart';
+import 'package:omi/pages/apps/providers/add_app_provider.dart';
 import 'package:omi/providers/app_provider.dart';
-import 'package:omi/utils/analytics/mixpanel.dart';
+import 'package:omi/utils/app_localizations_helper.dart';
 import 'package:omi/utils/other/temp.dart';
-import 'package:omi/widgets/extensions/string.dart';
-import 'package:provider/provider.dart';
-import 'dart:math';
 
 class CategorySection extends StatelessWidget {
   final String categoryName;
@@ -29,10 +33,8 @@ class CategorySection extends StatelessWidget {
       return const SizedBox.shrink();
     }
 
-    // Sort apps by downloads (most downloaded first) and show max 9 apps
-    final sortedApps = List<App>.from(apps);
-    sortedApps.sort((a, b) => (b.installs ?? 0).compareTo(a.installs ?? 0));
-    final displayedApps = sortedApps.take(9).toList();
+    // Apps are already sorted by score on the backend, just take first 9
+    final displayedApps = apps.take(9).toList();
 
     // --- Configuration Constants ---
     const double targetItemHeight = 85.0;
@@ -56,18 +58,14 @@ class CategorySection extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Section header - Apple style
+          // Section header
           Padding(
             padding: const EdgeInsets.fromLTRB(20, 24, 20, 16),
             child: Row(
               children: [
                 Text(
                   categoryName,
-                  style: const TextStyle(
-                    fontSize: 20,
-                    fontWeight: FontWeight.w600,
-                    color: Colors.white,
-                  ),
+                  style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w600, color: Colors.white),
                 ),
                 const Spacer(),
                 if (showViewAll)
@@ -84,19 +82,11 @@ class CategorySection extends StatelessWidget {
                           ),
                           child: Text(
                             'All',
-                            style: TextStyle(
-                              fontSize: 11,
-                              color: Colors.grey.shade300,
-                              fontWeight: FontWeight.w600,
-                            ),
+                            style: TextStyle(fontSize: 11, color: Colors.grey.shade300, fontWeight: FontWeight.w600),
                           ),
                         ),
                         // const SizedBox(width: 8),
-                        Icon(
-                          Icons.chevron_right,
-                          color: Colors.grey.shade400,
-                          size: 16,
-                        ),
+                        Icon(Icons.chevron_right, color: Colors.grey.shade400, size: 16),
                       ],
                     ),
                   ),
@@ -117,10 +107,7 @@ class CategorySection extends StatelessWidget {
                   mainAxisSpacing: mainAxisSpacing,
                 ),
                 itemCount: displayedApps.length,
-                itemBuilder: (context, index) => SectionAppItemCard(
-                  app: displayedApps[index],
-                  index: index,
-                ),
+                itemBuilder: (context, index) => SectionAppItemCard(app: displayedApps[index], index: index),
               ),
             ),
           ),
@@ -142,24 +129,21 @@ class SectionAppItemCard extends StatelessWidget {
     return Selector<AppProvider, bool>(
       selector: (context, provider) {
         // Only select the enabled state of this specific app
-        final currentApp = provider.apps.firstWhere(
-          (a) => a.id == app.id,
-          orElse: () => app,
-        );
+        final currentApp = provider.apps.firstWhere((a) => a.id == app.id, orElse: () => app);
         return currentApp.enabled;
       },
       builder: (context, isEnabled, child) {
         return GestureDetector(
           onTap: () async {
-            MixpanelManager().pageOpened('App Detail');
+            PlatformManager.instance.analytics.pageOpened('App Detail');
             await routeToPage(context, AppDetailPage(app: app));
-            context.read<AppProvider>().filterApps();
+            if (context.mounted) {
+              context.read<AppProvider>().filterApps();
+            }
           },
           child: Container(
             padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 4.0),
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(12.0),
-            ),
+            decoration: BoxDecoration(borderRadius: BorderRadius.circular(12.0)),
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.center,
               children: [
@@ -181,18 +165,12 @@ class SectionAppItemCard extends StatelessWidget {
                   placeholder: (context, url) => Container(
                     width: 60,
                     height: 60,
-                    decoration: BoxDecoration(
-                      color: Color(0xFF35343B),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
+                    decoration: BoxDecoration(color: Color(0xFF35343B), borderRadius: BorderRadius.circular(8)),
                   ),
                   errorWidget: (context, url, error) => Container(
                     width: 60,
                     height: 60,
-                    decoration: BoxDecoration(
-                      color: Color(0xFF35343B),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
+                    decoration: BoxDecoration(color: Color(0xFF35343B), borderRadius: BorderRadius.circular(8)),
                     child: const Icon(Icons.error_outline, color: Colors.white54, size: 24),
                   ),
                 ),
@@ -205,26 +183,45 @@ class SectionAppItemCard extends StatelessWidget {
                     children: [
                       Text(
                         app.name,
-                        maxLines: 2,
+                        maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(fontWeight: FontWeight.w500, color: Colors.white, fontSize: 17),
                       ),
                       Padding(
                         padding: const EdgeInsets.only(top: 2.0),
-                        child: Text(
-                          app.description.decodeString,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(color: Colors.grey, fontSize: 13),
+                        child: Builder(
+                          builder: (context) {
+                            // Look up category title from backend-provided categories
+                            final categories = context.read<AddAppProvider>().categories;
+                            final category = categories.firstWhere(
+                              (c) => c.id == app.category,
+                              orElse: () => Category(id: app.category, title: app.getCategoryName()),
+                            );
+                            return Text(
+                              category.getLocalizedTitle(context),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(color: Colors.grey, fontSize: 13),
+                            );
+                          },
                         ),
                       ),
+                      if (app.ratingAvg != null) ...[
+                        const SizedBox(height: 2),
+                        Text(
+                          '${app.getRatingAvg()!} · ${app.ratingCount} ${app.ratingCount == 1 ? "rating" : "ratings"}',
+                          style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ],
                     ],
                   ),
                 ),
 
                 const SizedBox(width: 8),
 
-                // Action button - Apple style
+                // Action button
                 Container(
                   width: 60,
                   height: 28,
@@ -234,7 +231,7 @@ class SectionAppItemCard extends StatelessWidget {
                   ),
                   child: Center(
                     child: Text(
-                      isEnabled ? 'Open' : 'Install',
+                      isEnabled ? 'Open' : 'Enable',
                       style: TextStyle(
                         fontSize: 12,
                         fontWeight: FontWeight.w600,

@@ -1,23 +1,27 @@
+import 'package:omi/utils/platform/platform_manager.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
+import 'package:provider/provider.dart';
+import 'package:omi/widgets/shimmer_with_timeout.dart';
+
 import 'package:omi/backend/schema/app.dart';
-import 'package:omi/pages/apps/providers/add_app_provider.dart';
-import 'package:omi/pages/apps/widgets/filter_sheet.dart';
+import 'package:omi/pages/apps/app_detail/app_detail.dart';
 import 'package:omi/pages/apps/list_item.dart';
+import 'package:omi/pages/apps/providers/add_app_provider.dart';
+import 'package:omi/pages/apps/widgets/capability_apps_page.dart';
 import 'package:omi/pages/apps/widgets/category_apps_page.dart';
 import 'package:omi/pages/apps/widgets/category_section.dart';
+import 'package:omi/pages/apps/widgets/filter_sheet.dart';
 import 'package:omi/pages/apps/widgets/popular_apps_section.dart';
-import 'package:omi/pages/apps/app_detail/app_detail.dart';
 import 'package:omi/providers/app_provider.dart';
 import 'package:omi/providers/home_provider.dart';
+import 'package:omi/utils/app_localizations_helper.dart';
+import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/other/debouncer.dart';
 import 'package:omi/utils/other/temp.dart';
 import 'package:omi/utils/ui_guidelines.dart';
-import 'package:provider/provider.dart';
-import 'package:shimmer/shimmer.dart';
-
-import 'widgets/create_options_sheet.dart';
 
 String filterValueToString(dynamic value) {
   if (value is String) {
@@ -44,10 +48,6 @@ class ExploreInstallPageState extends State<ExploreInstallPage> with AutomaticKe
   late TextEditingController searchController;
   Debouncer debouncer = Debouncer(delay: const Duration(milliseconds: 500));
 
-  // Cache grouped apps to avoid recomputing on every rebuild
-  Map<String, List<App>>? _cachedGroupedApps;
-  List<App>? _cachedAllApps;
-
   @override
   void initState() {
     searchController = TextEditingController();
@@ -68,11 +68,7 @@ class ExploreInstallPageState extends State<ExploreInstallPage> with AutomaticKe
 
   void scrollToTop() {
     if (widget.scrollController != null && widget.scrollController!.hasClients) {
-      widget.scrollController!.animateTo(
-        0.0,
-        duration: const Duration(milliseconds: 500),
-        curve: Curves.easeOutCubic,
-      );
+      widget.scrollController!.animateTo(0.0, duration: const Duration(milliseconds: 500), curve: Curves.easeOutCubic);
     }
   }
 
@@ -82,105 +78,138 @@ class ExploreInstallPageState extends State<ExploreInstallPage> with AutomaticKe
     super.dispose();
   }
 
-  Map<String, List<App>> _groupAppsByCategory(List<App> apps) {
-    // Use cached result if apps haven't changed
-    if (_cachedAllApps != null && _cachedGroupedApps != null && apps.length == _cachedAllApps!.length) {
-      return _cachedGroupedApps!;
-    }
-
-    Map<String, List<App>> groupedApps = {};
-    for (var app in apps) {
-      String categoryName = app.getCategoryName();
-      if (!groupedApps.containsKey(categoryName)) {
-        groupedApps[categoryName] = [];
-      }
-      groupedApps[categoryName]!.add(app);
-    }
-
-    // Cache the result
-    _cachedAllApps = List.from(apps);
-    _cachedGroupedApps = groupedApps;
-
-    return groupedApps;
-  }
-
-  Widget _buildAppsView() {
-    return Selector<AppProvider, ({bool isFilterActive, bool isSearchActive})>(
-      selector: (context, provider) => (
-        isFilterActive: provider.isFilterActive(),
-        isSearchActive: provider.isSearchActive(),
-      ),
-      builder: (context, state, child) {
-        if (state.isFilterActive || state.isSearchActive) {
-          return _buildFilteredAppsView();
-        }
-        return _buildCategorizedAppsView();
-      },
-    );
-  }
-
-  Widget _buildShimmerCreateButton() {
-    return Shimmer.fromColors(
-      baseColor: AppStyles.backgroundSecondary,
-      highlightColor: AppStyles.backgroundTertiary,
-      child: Container(
-        padding: const EdgeInsets.all(20),
-        margin: const EdgeInsets.fromLTRB(16, 16, 16, 16),
-        decoration: BoxDecoration(
-          color: AppStyles.backgroundSecondary,
-          borderRadius: BorderRadius.circular(16),
-        ),
-        child: Row(
-          children: [
-            Container(
-              width: 36,
-              height: 36,
-              decoration: BoxDecoration(
-                color: AppStyles.backgroundTertiary,
-                borderRadius: BorderRadius.circular(8),
-              ),
-            ),
-            const SizedBox(width: 16),
-            Expanded(
+  Widget _buildFilteredAppsSlivers() {
+    return Selector<AppProvider, List<App>>(
+      selector: (context, provider) => provider.filteredApps,
+      builder: (context, filteredApps, child) {
+        if (filteredApps.isEmpty) {
+          return SliverToBoxAdapter(
+            child: Padding(
+              padding: EdgeInsets.only(top: MediaQuery.sizeOf(context).height * 0.3),
               child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Container(
-                    width: 180,
-                    height: 16,
-                    decoration: BoxDecoration(
-                      color: AppStyles.backgroundTertiary,
-                      borderRadius: BorderRadius.circular(4),
-                    ),
+                  Icon(Icons.search_off, size: 64, color: Colors.grey.shade600),
+                  const SizedBox(height: 16),
+                  Text(
+                    context.l10n.noAppsFound,
+                    style: const TextStyle(fontSize: 18, color: Colors.white70),
+                    textAlign: TextAlign.center,
                   ),
-                  const SizedBox(height: 6),
-                  Container(
-                    width: 120,
-                    height: 12,
-                    decoration: BoxDecoration(
-                      color: AppStyles.backgroundTertiary,
-                      borderRadius: BorderRadius.circular(4),
-                    ),
+                  const SizedBox(height: 8),
+                  Text(
+                    context.l10n.tryAdjustingSearch,
+                    style: TextStyle(fontSize: 14, color: Colors.grey.shade400),
+                    textAlign: TextAlign.center,
                   ),
                 ],
               ),
             ),
-            Container(
-              width: 24,
-              height: 24,
-              decoration: BoxDecoration(
-                color: AppStyles.backgroundTertiary,
-                borderRadius: BorderRadius.circular(4),
-              ),
-            ),
-          ],
-        ),
-      ),
+          );
+        }
+
+        return SliverPadding(
+          padding: const EdgeInsets.only(bottom: 64, left: 20, right: 20, top: 20),
+          sliver: SliverList.separated(
+            itemCount: filteredApps.length,
+            separatorBuilder: (context, index) => const SizedBox(height: 8),
+            itemBuilder: (context, index) {
+              final app = filteredApps[index];
+              return Selector<AppProvider, List<App>>(
+                selector: (context, provider) => provider.apps,
+                builder: (context, allApps, child) {
+                  final originalIndex = allApps.indexWhere((appItem) => appItem.id == app.id);
+                  return AppListItem(app: app, index: originalIndex);
+                },
+              );
+            },
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildCategorizedAppsSlivers() {
+    // Render v2 groups directly from provider (grouped by capability)
+    return Selector<AppProvider, List<Map<String, dynamic>>>(
+      selector: (context, provider) => provider.groupedApps,
+      builder: (context, groups, child) {
+        // Filter out sections that are accessed elsewhere:
+        // - "Summary" (memories) section - accessed via conversation detail page
+        // - "Chat Assistants" (chat) section - accessed via chat page drawer
+        final filteredGroups = groups.where((group) {
+          final capabilityMap = group['capability'] as Map<String, dynamic>?;
+          final groupId = capabilityMap?['id'] as String? ?? '';
+          return groupId != 'memories' && groupId != 'chat';
+        }).toList();
+
+        return SliverPadding(
+          padding: const EdgeInsets.only(top: 8, bottom: 100),
+          sliver: SliverList.builder(
+            itemCount: filteredGroups.length,
+            itemBuilder: (context, index) {
+              final group = filteredGroups[index];
+              // Support capability-based grouping (new) and category-based (legacy)
+              final capabilityMap = group['capability'] as Map<String, dynamic>?;
+              final categoryMap = group['category'] as Map<String, dynamic>?;
+
+              final groupMap = capabilityMap ?? categoryMap;
+              final groupTitle = (groupMap != null ? (groupMap['title'] as String? ?? '') : '').trim();
+              final groupId = groupMap != null ? (groupMap['id'] as String? ?? '') : '';
+              final groupApps = group['data'] as List<App>? ?? <App>[];
+
+              // Get localized section title
+              String localizedSectionTitle;
+              if (capabilityMap != null) {
+                final capability = AppCapability(
+                  title: groupTitle.isEmpty ? 'Apps' : groupTitle,
+                  id: groupId.isEmpty ? groupTitle.toLowerCase().replaceAll(' ', '_') : groupId,
+                );
+                localizedSectionTitle = capability.getLocalizedTitle(context);
+              } else {
+                final category = context.read<AddAppProvider>().categories.firstWhere(
+                      (cat) => cat.id == groupId || cat.title == groupTitle,
+                      orElse: () => Category(
+                        title: groupTitle.isEmpty ? 'Apps' : groupTitle,
+                        id: groupId.isEmpty ? groupTitle.toLowerCase().replaceAll(' ', '-') : groupId,
+                      ),
+                    );
+                localizedSectionTitle = category.getLocalizedTitle(context);
+              }
+
+              return CategorySection(
+                categoryName: localizedSectionTitle,
+                apps: groupApps,
+                showViewAll: groupApps.length > 9,
+                onViewAll: () {
+                  if (capabilityMap != null) {
+                    // Capability-based navigation - use title from grouped response to match section title
+                    final capability = AppCapability(
+                      title: groupTitle.isEmpty ? 'Apps' : groupTitle,
+                      id: groupId.isEmpty ? groupTitle.toLowerCase().replaceAll(' ', '_') : groupId,
+                    );
+                    routeToPage(context, CapabilityAppsPage(capability: capability, apps: groupApps));
+                  } else {
+                    // Legacy category-based navigation
+                    final category = context.read<AddAppProvider>().categories.firstWhere(
+                          (cat) => cat.id == groupId || cat.title == groupTitle,
+                          orElse: () => Category(
+                            title: groupTitle.isEmpty ? 'Apps' : groupTitle,
+                            id: groupId.isEmpty ? groupTitle.toLowerCase().replaceAll(' ', '-') : groupId,
+                          ),
+                        );
+                    routeToPage(context, CategoryAppsPage(category: category, apps: groupApps));
+                  }
+                },
+              );
+            },
+          ),
+        );
+      },
     );
   }
 
   Widget _buildShimmerSearchBar() {
-    return Shimmer.fromColors(
+    return ShimmerWithTimeout(
       baseColor: AppStyles.backgroundSecondary,
       highlightColor: AppStyles.backgroundTertiary,
       child: Container(
@@ -189,11 +218,29 @@ class ExploreInstallPageState extends State<ExploreInstallPage> with AutomaticKe
           children: [
             Expanded(
               child: Container(
-                height: 44,
+                height: 48,
                 decoration: BoxDecoration(
                   color: AppStyles.backgroundSecondary,
                   borderRadius: BorderRadius.circular(AppStyles.radiusLarge),
                 ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Container(
+              width: 44,
+              height: 48,
+              decoration: BoxDecoration(
+                color: AppStyles.backgroundSecondary,
+                borderRadius: BorderRadius.circular(AppStyles.radiusLarge),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Container(
+              width: 44,
+              height: 44,
+              decoration: BoxDecoration(
+                color: AppStyles.backgroundSecondary,
+                borderRadius: BorderRadius.circular(AppStyles.radiusLarge),
               ),
             ),
             const SizedBox(width: 8),
@@ -212,7 +259,7 @@ class ExploreInstallPageState extends State<ExploreInstallPage> with AutomaticKe
   }
 
   Widget _buildShimmerCategorySection() {
-    return Shimmer.fromColors(
+    return ShimmerWithTimeout(
       baseColor: AppStyles.backgroundSecondary,
       highlightColor: AppStyles.backgroundTertiary,
       child: Container(
@@ -332,142 +379,70 @@ class ExploreInstallPageState extends State<ExploreInstallPage> with AutomaticKe
     );
   }
 
-  Widget _buildFilteredAppsView() {
-    return Selector<AppProvider, List<App>>(
-      selector: (context, provider) => provider.filteredApps,
-      builder: (context, filteredApps, child) {
-        if (filteredApps.isEmpty) {
-          return Padding(
-            padding: EdgeInsets.only(top: MediaQuery.sizeOf(context).height * 0.3),
-            child: Column(
-              children: [
-                Icon(
-                  Icons.search_off,
-                  size: 64,
-                  color: Colors.grey.shade600,
-                ),
-                const SizedBox(height: 16),
-                const Text(
-                  'No apps found',
-                  style: TextStyle(fontSize: 18, color: Colors.white70),
-                  textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  'Try adjusting your search or filters',
-                  style: TextStyle(fontSize: 14, color: Colors.grey.shade400),
-                  textAlign: TextAlign.center,
-                ),
-              ],
-            ),
-          );
-        } else {
-          return Padding(
-            padding: const EdgeInsets.only(bottom: 64, left: 20, right: 20, top: 20),
-            child: Column(
-              children: filteredApps.asMap().entries.map((entry) {
-                final index = entry.key;
-                final app = entry.value;
-                return Selector<AppProvider, List<App>>(
-                  selector: (context, provider) => provider.apps,
-                  builder: (context, allApps, child) {
-                    final originalIndex = allApps.indexWhere(
-                      (appItem) => appItem.id == app.id,
-                    );
-                    return Padding(
-                      padding: EdgeInsets.only(bottom: index < filteredApps.length - 1 ? 8 : 0),
-                      child: AppListItem(
-                        app: app,
-                        index: originalIndex,
-                      ),
-                    );
-                  },
-                );
-              }).toList(),
-            ),
-          );
-        }
-      },
+  Widget _buildSearchLoadingSliver() {
+    return SliverPadding(
+      padding: const EdgeInsets.only(bottom: 64, left: 20, right: 20, top: 20),
+      sliver: SliverList(
+        delegate: SliverChildBuilderDelegate(
+          (context, index) => _buildShimmerListItem(),
+          childCount: 5, // Show 5 shimmer items
+        ),
+      ),
     );
   }
 
-  Widget _buildCategorizedAppsView() {
-    return Selector<AppProvider, List<App>>(
-      selector: (context, provider) => provider.apps,
-      builder: (context, apps, child) {
-        final groupedApps = _groupAppsByCategory(apps);
-
-        // Get most downloaded apps overall (sorted by installs)
-        final allApps = List<App>.from(apps);
-        allApps.sort((a, b) => b.installs.compareTo(a.installs));
-        final mostDownloadedApps = allApps.take(20).toList(); // Get top 20 most downloaded
-
-        return Column(
+  Widget _buildShimmerListItem() {
+    return ShimmerWithTimeout(
+      baseColor: AppStyles.backgroundSecondary,
+      highlightColor: AppStyles.backgroundTertiary,
+      child: Container(
+        padding: const EdgeInsets.all(16),
+        margin: const EdgeInsets.only(bottom: 8),
+        decoration: BoxDecoration(color: AppStyles.backgroundSecondary, borderRadius: BorderRadius.circular(16)),
+        child: Row(
           children: [
-            const SizedBox(height: 8),
-
-            // Popular Apps Section - First category, no view all
-            if (mostDownloadedApps.isNotEmpty)
-              CategorySection(
-                categoryName: 'Popular Apps',
-                apps: mostDownloadedApps,
-                showViewAll: false,
-                onViewAll: () {},
-              ),
-
-            // Other categories sections - sorted alphabetically
-            ...(() {
-              final sortedEntries = groupedApps.entries.where((entry) => entry.key != 'Popular').toList();
-
-              // Custom sorting: alphabetical but with blank/empty and "Other" at the end
-              sortedEntries.sort((a, b) {
-                final aKey = a.key.trim();
-                final bKey = b.key.trim();
-
-                // Handle blank/empty categories
-                if (aKey.isEmpty && bKey.isEmpty) return 0;
-                if (aKey.isEmpty) return 1; // a goes to end
-                if (bKey.isEmpty) return -1; // b goes to end
-
-                // Handle "Other" category
-                if (aKey.toLowerCase() == 'other' && bKey.toLowerCase() == 'other') return 0;
-                if (aKey.toLowerCase() == 'other') return 1; // a goes to end
-                if (bKey.toLowerCase() == 'other') return -1; // b goes to end
-
-                // Normal alphabetical sorting
-                return aKey.compareTo(bKey);
-              });
-
-              return sortedEntries;
-            })()
-                .map((entry) {
-              final categoryName = entry.key;
-              final categoryApps = entry.value;
-
-              return CategorySection(
-                categoryName: categoryName,
-                apps: categoryApps,
-                onViewAll: () {
-                  final category = context.read<AddAppProvider>().categories.firstWhere(
-                        (cat) => cat.title == categoryName,
-                        orElse: () =>
-                            Category(title: categoryName, id: categoryName.toLowerCase().replaceAll(' ', '-')),
-                      );
-                  routeToPage(
-                    context,
-                    CategoryAppsPage(
-                      category: category,
-                      apps: categoryApps,
+            // App icon shimmer
+            Container(
+              width: 60,
+              height: 60,
+              decoration: BoxDecoration(color: AppStyles.backgroundTertiary, borderRadius: BorderRadius.circular(12)),
+            ),
+            const SizedBox(width: 16),
+            // App info shimmer
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Container(
+                    width: double.infinity,
+                    height: 18,
+                    decoration: BoxDecoration(
+                      color: AppStyles.backgroundTertiary,
+                      borderRadius: BorderRadius.circular(4),
                     ),
-                  );
-                },
-              );
-            }),
-
-            const SizedBox(height: 100),
+                  ),
+                  const SizedBox(height: 8),
+                  Container(
+                    width: 150,
+                    height: 14,
+                    decoration: BoxDecoration(
+                      color: AppStyles.backgroundTertiary,
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 12),
+            // Button shimmer
+            Container(
+              width: 72,
+              height: 32,
+              decoration: BoxDecoration(color: AppStyles.backgroundTertiary, borderRadius: BorderRadius.circular(16)),
+            ),
           ],
-        );
-      },
+        ),
+      ),
     );
   }
 
@@ -476,254 +451,446 @@ class ExploreInstallPageState extends State<ExploreInstallPage> with AutomaticKe
     // Wrap with NotificationListener to catch SelectAppNotification
     super.build(context);
     return NotificationListener<SelectAppNotification>(
-        onNotification: _handleSelectAppNotification,
-        child: Selector<AppProvider,
-            ({bool isLoading, Map<String, dynamic> filters, bool isSearchActive, int filterCount})>(
-          selector: (context, provider) => (
+      onNotification: _handleSelectAppNotification,
+      child: Selector<
+          AppProvider,
+          ({
+            bool isLoading,
+            bool isSearching,
+            Map<String, dynamic> filters,
+            bool isSearchActive,
+            bool isFilterActive,
+            int filterCount,
+            bool isMyAppsSelected,
+            bool isInstalledSelected,
+            int visibleFilterCount,
+            String? firstFilterText,
+          })>(
+        selector: (context, provider) {
+          // Calculate visible filters (excluding "My Apps" and "Installed Apps")
+          final visibleFilters = provider.filters.entries.where((entry) {
+            if (entry.key == 'Apps') {
+              return entry.value != 'My Apps' && entry.value != 'Installed Apps';
+            }
+            return true;
+          }).toList();
+
+          return (
             isLoading: provider.isLoading,
+            isSearching: provider.isSearching,
             filters: provider.filters,
             isSearchActive: provider.isSearchActive(),
-            filterCount: provider.filters.length
-          ),
-          builder: (context, state, child) {
-            return RefreshIndicator(
-              onRefresh: () async {
-                HapticFeedback.mediumImpact();
-                await context.read<AppProvider>().forceRefreshApps();
-              },
-              color: Colors.deepPurpleAccent,
-              backgroundColor: Colors.white,
-              child: CustomScrollView(
-                controller: widget.scrollController,
-                physics: const AlwaysScrollableScrollPhysics(),
-                slivers: [
-                  const SliverToBoxAdapter(child: SizedBox(height: 12)),
-                  SliverToBoxAdapter(
-                    child: state.isLoading
-                        ? _buildShimmerCreateButton()
-                        : GestureDetector(
-                            onTap: () async {
-                              showModalBottomSheet(
-                                context: context,
-                                builder: (context) => const CreateOptionsSheet(),
-                                shape: const RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-                                ),
-                              );
-                            },
-                            child: Container(
-                              padding: const EdgeInsets.all(20),
-                              margin: const EdgeInsets.fromLTRB(16, 16, 16, 16),
-                              decoration: BoxDecoration(
-                                color: Colors.white.withValues(alpha: 0.9),
-                                borderRadius: BorderRadius.circular(16),
-                              ),
-                              child: Row(
-                                children: [
-                                  Container(
-                                    padding: const EdgeInsets.all(8),
-                                    decoration: BoxDecoration(
-                                      color: const Color(0xFF1F1F25),
-                                      borderRadius: BorderRadius.circular(8),
-                                    ),
-                                    child: const Icon(
-                                      Icons.add,
-                                      color: Colors.white,
-                                      size: 20,
-                                    ),
-                                  ),
-                                  const SizedBox(width: 16),
-                                  const Expanded(
-                                    child: Column(
-                                      crossAxisAlignment: CrossAxisAlignment.start,
-                                      children: [
-                                        Text(
-                                          'Create Your Own App',
-                                          style: TextStyle(
-                                            fontSize: 16,
-                                            fontWeight: FontWeight.w600,
-                                            color: Colors.black,
-                                          ),
-                                        ),
-                                        SizedBox(height: 2),
-                                        Text(
-                                          'Build and share your custom app',
-                                          style: TextStyle(
-                                            fontSize: 13,
-                                            color: Colors.black54,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                  const Icon(
-                                    Icons.chevron_right,
-                                    color: Colors.black,
-                                    size: 24,
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ),
-                  ),
+            isFilterActive: provider.isFilterActive(),
+            filterCount: provider.filters.length,
+            isMyAppsSelected: provider.isFilterSelected('My Apps', 'Apps'),
+            isInstalledSelected: provider.isFilterSelected('Installed Apps', 'Apps'),
+            visibleFilterCount: visibleFilters.length,
+            firstFilterText: visibleFilters.isNotEmpty ? filterValueToString(visibleFilters.first.value) : null,
+          );
+        },
+        builder: (context, state, child) {
+          return RefreshIndicator(
+            onRefresh: () async {
+              HapticFeedback.mediumImpact();
+              await context.read<AppProvider>().forceRefreshApps();
+            },
+            color: Colors.deepPurpleAccent,
+            backgroundColor: Colors.white,
+            child: CustomScrollView(
+              controller: widget.scrollController,
+              physics: const AlwaysScrollableScrollPhysics(),
+              slivers: [
+                const SliverToBoxAdapter(child: SizedBox(height: 4)),
 
-                  // Top bar with search and filters - show shimmer when loading
-                  SliverToBoxAdapter(
-                    child: state.isLoading
-                        ? _buildShimmerSearchBar()
-                        : Container(
-                            margin: const EdgeInsets.fromLTRB(16, 12, 16, 0),
-                            child: Row(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Expanded(
-                                  child: Column(
-                                    children: [
-                                      SizedBox(
+                // Top bar with search and filters - show shimmer when loading
+                SliverToBoxAdapter(
+                  child: state.isLoading
+                      ? _buildShimmerSearchBar()
+                      : Container(
+                          margin: const EdgeInsets.fromLTRB(16, 4, 16, 0),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              // Search bar - shrinks to square when filters are active (but not when search is active)
+                              AnimatedContainer(
+                                duration: const Duration(milliseconds: 200),
+                                curve: Curves.easeInOut,
+                                width: (!state.isSearchActive &&
+                                        (state.isMyAppsSelected ||
+                                            state.isInstalledSelected ||
+                                            state.visibleFilterCount > 0))
+                                    ? 44
+                                    : null,
+                                child: (!state.isSearchActive &&
+                                        (state.isMyAppsSelected ||
+                                            state.isInstalledSelected ||
+                                            state.visibleFilterCount > 0))
+                                    ? SizedBox(
                                         height: 44,
-                                        child: SearchBar(
-                                          hintText: 'Search Apps',
-                                          leading: const Padding(
-                                            padding: EdgeInsets.only(left: 6.0),
-                                            child:
-                                                Icon(FontAwesomeIcons.magnifyingGlass, color: Colors.white70, size: 14),
+                                        child: Container(
+                                          decoration: BoxDecoration(
+                                            color: AppStyles.backgroundSecondary,
+                                            borderRadius: BorderRadius.circular(AppStyles.radiusLarge),
                                           ),
-                                          backgroundColor: WidgetStateProperty.all(AppStyles.backgroundSecondary),
-                                          elevation: WidgetStateProperty.all(0),
-                                          padding: WidgetStateProperty.all(
-                                            const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                                          child: IconButton(
+                                            onPressed: () {
+                                              // Clear all filters and expand search
+                                              final provider = context.read<AppProvider>();
+                                              if (state.isMyAppsSelected) {
+                                                provider.addOrRemoveFilter('My Apps', 'Apps');
+                                              }
+                                              if (state.isInstalledSelected) {
+                                                provider.addOrRemoveFilter('Installed Apps', 'Apps');
+                                              }
+                                              // Clear other filters
+                                              final visibleFilters = state.filters.entries.where((entry) {
+                                                if (entry.key == 'Apps') {
+                                                  return entry.value != 'My Apps' && entry.value != 'Installed Apps';
+                                                }
+                                                return true;
+                                              }).toList();
+                                              for (final entry in visibleFilters) {
+                                                provider.removeFilter(entry.key);
+                                              }
+                                              provider.applyFilters();
+                                            },
+                                            icon: const Icon(
+                                              Icons.search,
+                                              color: Colors.white60,
+                                              size: 20,
+                                            ),
+                                            padding: EdgeInsets.zero,
                                           ),
-                                          focusNode: context.read<HomeProvider>().appsSearchFieldFocusNode,
-                                          controller: searchController,
-                                          trailing: state.isSearchActive
-                                              ? [
-                                                  IconButton(
-                                                    icon: const Icon(Icons.close, color: Colors.white70, size: 16),
-                                                    padding: EdgeInsets.zero,
-                                                    constraints: const BoxConstraints(
-                                                      minHeight: 36,
-                                                      minWidth: 36,
-                                                    ),
-                                                    onPressed: () {
-                                                      searchController.clear();
-                                                      context.read<AppProvider>().searchApps('');
-                                                    },
-                                                  )
-                                                ]
-                                              : null,
-                                          hintStyle: WidgetStateProperty.all(
-                                            TextStyle(color: AppStyles.textTertiary, fontSize: 14),
-                                          ),
-                                          textStyle: WidgetStateProperty.all(
-                                            const TextStyle(color: AppStyles.textPrimary, fontSize: 14),
-                                          ),
-                                          shape: WidgetStateProperty.all(
-                                            RoundedRectangleBorder(
-                                              borderRadius: BorderRadius.circular(AppStyles.radiusLarge),
+                                        ),
+                                      )
+                                    : Expanded(
+                                        child: Column(
+                                          children: [
+                                            SizedBox(
+                                              height: 44,
+                                              child: SearchBar(
+                                                hintText: context.l10n.searchAppsPlaceholder,
+                                                leading: const Padding(
+                                                  padding: EdgeInsets.only(left: 6.0),
+                                                  child: Icon(
+                                                    Icons.search,
+                                                    color: Colors.white60,
+                                                    size: 20,
+                                                  ),
+                                                ),
+                                                backgroundColor: WidgetStateProperty.all(
+                                                  AppStyles.backgroundSecondary,
+                                                ),
+                                                elevation: WidgetStateProperty.all(0),
+                                                padding: WidgetStateProperty.all(
+                                                  const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                                                ),
+                                                focusNode: context.read<HomeProvider>().appsSearchFieldFocusNode,
+                                                controller: searchController,
+                                                trailing: state.isSearchActive
+                                                    ? [
+                                                        IconButton(
+                                                          icon: const Icon(
+                                                            Icons.close,
+                                                            color: Colors.white70,
+                                                            size: 16,
+                                                          ),
+                                                          padding: EdgeInsets.zero,
+                                                          constraints: const BoxConstraints(
+                                                            minHeight: 36,
+                                                            minWidth: 36,
+                                                          ),
+                                                          onPressed: () {
+                                                            searchController.clear();
+                                                            context.read<AppProvider>().searchApps('');
+                                                          },
+                                                        ),
+                                                      ]
+                                                    : null,
+                                                hintStyle: WidgetStateProperty.all(
+                                                  TextStyle(color: AppStyles.textTertiary, fontSize: 14),
+                                                ),
+                                                textStyle: WidgetStateProperty.all(
+                                                  const TextStyle(color: AppStyles.textPrimary, fontSize: 14),
+                                                ),
+                                                shape: WidgetStateProperty.all(
+                                                  RoundedRectangleBorder(
+                                                    borderRadius: BorderRadius.circular(AppStyles.radiusLarge),
+                                                  ),
+                                                ),
+                                                onChanged: (value) {
+                                                  debouncer.run(() {
+                                                    context.read<AppProvider>().searchApps(value);
+                                                  });
+                                                },
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                              ),
+
+                              const SizedBox(width: 8),
+
+                              // My Apps button - expands when selected
+                              state.isMyAppsSelected
+                                  ? Expanded(
+                                      child: AnimatedContainer(
+                                        duration: const Duration(milliseconds: 200),
+                                        curve: Curves.easeInOut,
+                                        height: 44,
+                                        decoration: BoxDecoration(
+                                          color: Colors.deepPurpleAccent.withValues(alpha: 0.5),
+                                          borderRadius: BorderRadius.circular(AppStyles.radiusLarge),
+                                        ),
+                                        child: TextButton.icon(
+                                          onPressed: () {
+                                            HapticFeedback.mediumImpact();
+                                            final provider = context.read<AppProvider>();
+                                            final wasSelected = provider.isFilterSelected('My Apps', 'Apps');
+                                            provider.addOrRemoveFilter('My Apps', 'Apps');
+                                            provider.applyFilters();
+                                            PlatformManager.instance.analytics.appsTypeFilter(
+                                              'My Apps',
+                                              !wasSelected,
+                                            );
+                                          },
+                                          icon: FaIcon(FontAwesomeIcons.solidUser, size: 16, color: Colors.white),
+                                          label: Text(
+                                            context.l10n.myApps,
+                                            style: const TextStyle(
+                                              fontSize: 14,
+                                              color: Colors.white,
+                                              fontWeight: FontWeight.w500,
                                             ),
                                           ),
-                                          onChanged: (value) {
-                                            debouncer.run(() {
-                                              context.read<AppProvider>().searchApps(value);
-                                            });
+                                          style: TextButton.styleFrom(
+                                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 0),
+                                          ),
+                                        ),
+                                      ),
+                                    )
+                                  : SizedBox(
+                                      width: 44,
+                                      height: 44,
+                                      child: AnimatedContainer(
+                                        duration: const Duration(milliseconds: 200),
+                                        curve: Curves.easeInOut,
+                                        decoration: BoxDecoration(
+                                          color: AppStyles.backgroundSecondary,
+                                          borderRadius: BorderRadius.circular(AppStyles.radiusLarge),
+                                        ),
+                                        child: IconButton(
+                                          onPressed: () {
+                                            HapticFeedback.mediumImpact();
+                                            final provider = context.read<AppProvider>();
+                                            final wasSelected = provider.isFilterSelected('My Apps', 'Apps');
+                                            provider.addOrRemoveFilter('My Apps', 'Apps');
+                                            provider.applyFilters();
+                                            PlatformManager.instance.analytics.appsTypeFilter(
+                                              'My Apps',
+                                              !wasSelected,
+                                            );
                                           },
+                                          icon: FaIcon(FontAwesomeIcons.solidUser, size: 16, color: Colors.white),
+                                          padding: EdgeInsets.zero,
                                         ),
                                       ),
-                                      if (state.filterCount > 0) ...[
-                                        const SizedBox(height: 8),
-                                        SizedBox(
-                                          height: 32,
-                                          child: ListView.separated(
-                                            scrollDirection: Axis.horizontal,
-                                            itemBuilder: (ctx, idx) {
-                                              return Container(
-                                                height: 32,
+                                    ),
+
+                              const SizedBox(width: 8),
+
+                              // Installed Apps button - expands when selected
+                              state.isInstalledSelected
+                                  ? Expanded(
+                                      child: AnimatedContainer(
+                                        duration: const Duration(milliseconds: 200),
+                                        curve: Curves.easeInOut,
+                                        height: 44,
+                                        decoration: BoxDecoration(
+                                          color: Colors.deepPurpleAccent.withValues(alpha: 0.5),
+                                          borderRadius: BorderRadius.circular(AppStyles.radiusLarge),
+                                        ),
+                                        child: TextButton.icon(
+                                          onPressed: () {
+                                            HapticFeedback.mediumImpact();
+                                            final provider = context.read<AppProvider>();
+                                            final wasSelected = provider.isFilterSelected('Installed Apps', 'Apps');
+                                            provider.addOrRemoveFilter('Installed Apps', 'Apps');
+                                            provider.applyFilters();
+                                            PlatformManager.instance.analytics.appsTypeFilter(
+                                              'Installed Apps',
+                                              !wasSelected,
+                                            );
+                                          },
+                                          icon: FaIcon(FontAwesomeIcons.download, size: 16, color: Colors.white),
+                                          label: Text(
+                                            (state.visibleFilterCount > 0 && !state.isSearchActive)
+                                                ? context.l10n.installed
+                                                : context.l10n.installedApps,
+                                            style: const TextStyle(
+                                              fontSize: 14,
+                                              color: Colors.white,
+                                              fontWeight: FontWeight.w500,
+                                            ),
+                                          ),
+                                          style: TextButton.styleFrom(
+                                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 0),
+                                          ),
+                                        ),
+                                      ),
+                                    )
+                                  : SizedBox(
+                                      width: 44,
+                                      height: 44,
+                                      child: AnimatedContainer(
+                                        duration: const Duration(milliseconds: 200),
+                                        curve: Curves.easeInOut,
+                                        decoration: BoxDecoration(
+                                          color: AppStyles.backgroundSecondary,
+                                          borderRadius: BorderRadius.circular(AppStyles.radiusLarge),
+                                        ),
+                                        child: IconButton(
+                                          onPressed: () {
+                                            HapticFeedback.mediumImpact();
+                                            final provider = context.read<AppProvider>();
+                                            final wasSelected = provider.isFilterSelected('Installed Apps', 'Apps');
+                                            provider.addOrRemoveFilter('Installed Apps', 'Apps');
+                                            provider.applyFilters();
+                                            PlatformManager.instance.analytics.appsTypeFilter(
+                                              'Installed Apps',
+                                              !wasSelected,
+                                            );
+                                          },
+                                          icon: FaIcon(FontAwesomeIcons.download, size: 16, color: Colors.white),
+                                          padding: EdgeInsets.zero,
+                                        ),
+                                      ),
+                                    ),
+
+                              const SizedBox(width: 8),
+
+                              // Filter button - expands when filters are active (but not when search is active)
+                              state.visibleFilterCount > 0 && !state.isSearchActive
+                                  ? Expanded(
+                                      child: AnimatedContainer(
+                                        duration: const Duration(milliseconds: 200),
+                                        curve: Curves.easeInOut,
+                                        height: 44,
+                                        decoration: BoxDecoration(
+                                          color: Colors.deepPurpleAccent.withValues(alpha: 0.5),
+                                          borderRadius: BorderRadius.circular(AppStyles.radiusLarge),
+                                        ),
+                                        child: TextButton.icon(
+                                          onPressed: () {
+                                            HapticFeedback.mediumImpact();
+                                            showModalBottomSheet(
+                                              context: context,
+                                              isScrollControlled: true,
+                                              shape: const RoundedRectangleBorder(
+                                                borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+                                              ),
+                                              builder: (context) => const FilterBottomSheet(),
+                                            );
+                                          },
+                                          icon: FaIcon(FontAwesomeIcons.filter, size: 16, color: Colors.white),
+                                          label: Text(
+                                            context.l10n.filters,
+                                            style: const TextStyle(
+                                              fontSize: 14,
+                                              color: Colors.white,
+                                              fontWeight: FontWeight.w500,
+                                            ),
+                                          ),
+                                          style: TextButton.styleFrom(
+                                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 0),
+                                          ),
+                                        ),
+                                      ),
+                                    )
+                                  : SizedBox(
+                                      width: 44,
+                                      height: 44,
+                                      child: Stack(
+                                        clipBehavior: Clip.none,
+                                        children: [
+                                          AnimatedContainer(
+                                            duration: const Duration(milliseconds: 200),
+                                            curve: Curves.easeInOut,
+                                            decoration: BoxDecoration(
+                                              color: state.visibleFilterCount > 0
+                                                  ? Colors.deepPurpleAccent.withValues(alpha: 0.5)
+                                                  : AppStyles.backgroundSecondary,
+                                              borderRadius: BorderRadius.circular(AppStyles.radiusLarge),
+                                            ),
+                                            child: IconButton(
+                                              onPressed: () {
+                                                HapticFeedback.mediumImpact();
+                                                showModalBottomSheet(
+                                                  context: context,
+                                                  isScrollControlled: true,
+                                                  shape: const RoundedRectangleBorder(
+                                                    borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+                                                  ),
+                                                  builder: (context) => const FilterBottomSheet(),
+                                                );
+                                              },
+                                              icon: FaIcon(FontAwesomeIcons.filter, size: 16, color: Colors.white),
+                                              padding: EdgeInsets.zero,
+                                            ),
+                                          ),
+                                          // Badge showing filter count when filters are active
+                                          if (state.visibleFilterCount > 0)
+                                            Positioned(
+                                              top: -4,
+                                              right: -4,
+                                              child: Container(
+                                                padding: const EdgeInsets.all(4),
                                                 decoration: BoxDecoration(
-                                                  color: AppStyles.backgroundSecondary,
-                                                  borderRadius: BorderRadius.circular(16),
+                                                  color: Colors.white,
+                                                  shape: BoxShape.circle,
+                                                  border: Border.all(color: Colors.black, width: 1.5),
                                                 ),
-                                                child: TextButton.icon(
-                                                  onPressed: () {
-                                                    context
-                                                        .read<AppProvider>()
-                                                        .removeFilter(state.filters.keys.elementAt(idx));
-                                                  },
-                                                  icon: const Icon(
-                                                    Icons.close,
-                                                    size: 12,
-                                                    color: Colors.white70,
-                                                  ),
-                                                  label: Text(
-                                                    filterValueToString(state.filters.values.elementAt(idx)),
+                                                constraints: const BoxConstraints(minWidth: 16, minHeight: 16),
+                                                child: Center(
+                                                  child: Text(
+                                                    state.visibleFilterCount.toString(),
                                                     style: const TextStyle(
-                                                      fontSize: 12,
-                                                      color: Colors.white,
+                                                      color: Colors.black,
+                                                      fontSize: 10,
+                                                      fontWeight: FontWeight.w600,
+                                                      height: 1.0,
                                                     ),
-                                                  ),
-                                                  style: TextButton.styleFrom(
-                                                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 0),
-                                                    minimumSize: Size.zero,
-                                                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                                                    textAlign: TextAlign.center,
                                                   ),
                                                 ),
-                                              );
-                                            },
-                                            separatorBuilder: (ctx, idx) => const SizedBox(width: 8),
-                                            itemCount: state.filterCount,
-                                          ),
-                                        ),
-                                      ],
-                                    ],
-                                  ),
-                                ),
-
-                                const SizedBox(width: 8),
-
-                                // Filter button
-                                SizedBox(
-                                  width: 44,
-                                  height: 44,
-                                  child: Container(
-                                    decoration: BoxDecoration(
-                                      color: AppStyles.backgroundSecondary,
-                                      borderRadius: BorderRadius.circular(AppStyles.radiusLarge),
-                                    ),
-                                    child: IconButton(
-                                      onPressed: () {
-                                        showModalBottomSheet(
-                                          context: context,
-                                          isScrollControlled: true,
-                                          shape: const RoundedRectangleBorder(
-                                            borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-                                          ),
-                                          builder: (context) => const FilterBottomSheet(),
-                                        );
-                                      },
-                                      icon: const Icon(
-                                        FontAwesomeIcons.filter,
-                                        size: 16,
-                                        color: Colors.white,
+                                              ),
+                                            ),
+                                        ],
                                       ),
-                                      padding: EdgeInsets.zero,
                                     ),
-                                  ),
-                                ),
-                              ],
-                            ),
+                            ],
                           ),
-                  ),
+                        ),
+                ),
 
-                  const SliverToBoxAdapter(child: SizedBox(height: 0)),
+                const SliverToBoxAdapter(child: SizedBox(height: 0)),
 
-                  // Main content - show shimmer when loading
-                  SliverToBoxAdapter(
-                    child: state.isLoading ? _buildShimmerAppsView() : _buildAppsView(),
-                  ),
-                ],
-              ),
-            );
-          },
-        ));
+                // Main content - show shimmer when loading
+                if (state.isLoading)
+                  SliverToBoxAdapter(child: _buildShimmerAppsView())
+                else if (state.isSearching)
+                  _buildSearchLoadingSliver()
+                else if (state.isFilterActive || state.isSearchActive)
+                  _buildFilteredAppsSlivers()
+                else
+                  _buildCategorizedAppsSlivers(),
+              ],
+            ),
+          );
+        },
+      ),
+    );
   }
 
   @override

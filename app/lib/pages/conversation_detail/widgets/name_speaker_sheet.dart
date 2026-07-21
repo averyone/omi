@@ -1,13 +1,16 @@
-import 'package:collection/collection.dart';
 import 'package:flutter/material.dart';
+
+import 'package:collection/collection.dart';
+import 'package:provider/provider.dart';
+
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/message_event.dart';
 import 'package:omi/backend/schema/person.dart';
 import 'package:omi/backend/schema/transcript_segment.dart';
 import 'package:omi/pages/settings/people.dart';
+import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/providers/people_provider.dart';
 import 'package:omi/widgets/person_chip.dart';
-import 'package:provider/provider.dart';
 
 class NameSpeakerBottomSheet extends StatefulWidget {
   final int speakerId;
@@ -43,6 +46,7 @@ class _NameSpeakerBottomSheetState extends State<NameSpeakerBottomSheet> {
 
   void setLoading(bool value) {
     if (loading == value) return;
+    if (!mounted) return;
     setState(() {
       loading = value;
     });
@@ -134,6 +138,12 @@ class _NameSpeakerBottomSheetState extends State<NameSpeakerBottomSheet> {
   }
 
   @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     final peopleProvider = context.watch<PeopleProvider>();
     final people = peopleProvider.people;
@@ -151,11 +161,7 @@ class _NameSpeakerBottomSheetState extends State<NameSpeakerBottomSheet> {
               loading
                   ? const Padding(
                       padding: EdgeInsets.symmetric(vertical: 40),
-                      child: Center(
-                        child: CircularProgressIndicator(
-                          valueColor: AlwaysStoppedAnimation(Colors.white),
-                        ),
-                      ),
+                      child: Center(child: CircularProgressIndicator(valueColor: AlwaysStoppedAnimation(Colors.white))),
                     )
                   : Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -188,7 +194,7 @@ class _NameSpeakerBottomSheetState extends State<NameSpeakerBottomSheet> {
           children: [
             Expanded(
               child: Text(
-                'Tag Speaker ${widget.speakerId}',
+                context.l10n.tagSpeaker(TranscriptSegment.getDisplaySpeakerId(widget.speakerId, widget.segments)),
                 style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
               ),
             ),
@@ -226,13 +232,13 @@ class _NameSpeakerBottomSheetState extends State<NameSpeakerBottomSheet> {
             setState(() {
               selectedPerson = ''; // When typing, deselect any chosen person.
               if (isDuplicate) {
-                _duplicateNameError = 'A person with this name already exists.';
+                _duplicateNameError = context.l10n.personNameAlreadyExists;
                 setAllowSave(false);
               } else if (trimmedValue.isEmpty) {
                 _duplicateNameError = null;
                 setAllowSave(false);
               } else if (isOwnName) {
-                _duplicateNameError = 'To tag yourself, please select "You" from the list.';
+                _duplicateNameError = context.l10n.selectYouFromList;
                 setAllowSave(false);
               } else {
                 _duplicateNameError = null;
@@ -241,14 +247,11 @@ class _NameSpeakerBottomSheetState extends State<NameSpeakerBottomSheet> {
             });
           },
           decoration: InputDecoration(
-            hintText: 'Enter Person\'s Name',
+            hintText: context.l10n.enterPersonsName,
             filled: true,
             contentPadding: const EdgeInsets.symmetric(horizontal: 16),
             fillColor: Colors.grey[900],
-            border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(8),
-              borderSide: BorderSide.none,
-            ),
+            border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide.none),
             hintStyle: const TextStyle(color: Colors.grey),
             errorText: _duplicateNameError,
           ),
@@ -262,8 +265,8 @@ class _NameSpeakerBottomSheetState extends State<NameSpeakerBottomSheet> {
               setAllowSave(selectedPerson.isNotEmpty);
             });
           },
-          child: const Text('Cancel', style: TextStyle(color: Colors.white)),
-        )
+          child: Text(context.l10n.cancel, style: const TextStyle(color: Colors.white)),
+        ),
       ],
     );
   }
@@ -300,13 +303,13 @@ class _NameSpeakerBottomSheetState extends State<NameSpeakerBottomSheet> {
     });
 
     final List<Person> people = [
-      Person(id: 'user', name: '$userName (You)', colorIdx: 0, createdAt: DateTime.now(), updatedAt: DateTime.now())
+      Person(id: 'user', name: '$userName (You)', colorIdx: 0, createdAt: DateTime.now(), updatedAt: DateTime.now()),
     ];
     people.addAll(cachedPeople);
 
     final List<Widget> chips = [
       PersonChip(
-        personName: 'Add Person',
+        personName: context.l10n.addPerson,
         isSelected: _isCreatingNewPerson,
         isAddButton: true,
         onSelected: (_) {
@@ -316,22 +319,22 @@ class _NameSpeakerBottomSheetState extends State<NameSpeakerBottomSheet> {
             setAllowSave(false);
           });
         },
-      )
+      ),
     ];
-    chips.addAll(people.map((person) => PersonChip(
+    chips.addAll(
+      people.map(
+        (person) => PersonChip(
           personName: person.name,
           isSelected: selectedPerson == person.id,
           onSelected: (bool selected) {
             setSelectedPerson(person.id);
             setSelectedPersonName(person.id == 'user' ? userName : person.name);
           },
-        )));
-
-    return Wrap(
-      spacing: 8.0,
-      runSpacing: 8.0,
-      children: chips,
+        ),
+      ),
     );
+
+    return Wrap(spacing: 8.0, runSpacing: 8.0, children: chips);
   }
 
   Widget _buildUntaggedSegments() {
@@ -345,8 +348,8 @@ class _NameSpeakerBottomSheetState extends State<NameSpeakerBottomSheet> {
         CheckboxListTile(
           title: Text(
             _isSegmentsExpanded
-                ? 'Tag other segments from this speaker ($selectedUntaggedSegmentsCount/${untaggedSegments.length})'
-                : 'Tag other segments',
+                ? context.l10n.tagOtherSegmentsFromSpeaker(selectedUntaggedSegmentsCount, untaggedSegments.length)
+                : context.l10n.tagOtherSegments,
             style: TextStyle(fontSize: 14, color: untaggedSegments.isNotEmpty ? Colors.white : Colors.grey),
           ),
           value: _isSegmentsExpanded,
@@ -375,8 +378,8 @@ class _NameSpeakerBottomSheetState extends State<NameSpeakerBottomSheet> {
             child: Padding(
               padding: const EdgeInsets.only(right: 8.0),
               child: Text(
-                'Manage People',
-                style: TextStyle(
+                context.l10n.managePeople,
+                style: const TextStyle(
                   color: Colors.white70,
                   fontSize: 14,
                   decoration: TextDecoration.underline,
@@ -405,10 +408,7 @@ class _NameSpeakerBottomSheetState extends State<NameSpeakerBottomSheet> {
                         style: const TextStyle(fontSize: 12, color: Colors.white),
                       ),
                       const SizedBox(height: 4),
-                      Text(
-                        segment.getTimestampString(),
-                        style: TextStyle(fontSize: 10, color: Colors.grey.shade400),
-                      ),
+                      Text(segment.getTimestampString(), style: TextStyle(fontSize: 10, color: Colors.grey.shade400)),
                     ],
                   ),
                   value: _selectedSegmentIds.contains(segment.id),
@@ -440,9 +440,7 @@ class _NameSpeakerBottomSheetState extends State<NameSpeakerBottomSheet> {
         style: ElevatedButton.styleFrom(
           backgroundColor: Colors.white,
           foregroundColor: Colors.black,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(8),
-          ),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
         ),
         onPressed: !allowSave || loading
             ? null
@@ -458,16 +456,18 @@ class _NameSpeakerBottomSheetState extends State<NameSpeakerBottomSheet> {
                 }
 
                 await widget.onSpeakerAssigned(
-                    widget.speakerId, personIdToAssign, personNameToAssign, _selectedSegmentIds);
+                  widget.speakerId,
+                  personIdToAssign,
+                  personNameToAssign,
+                  _selectedSegmentIds,
+                );
 
                 setLoading(false);
                 if (mounted) {
                   Navigator.pop(context);
                 }
               },
-        child: const Center(
-          child: Text('Save'),
-        ),
+        child: Center(child: Text(context.l10n.save)),
       ),
     );
   }

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:video_player/video_player.dart';
 
@@ -28,52 +29,45 @@ class _DeviceOnboardingPageState extends State<DeviceOnboardingPage> with Single
   late Animation<double> _arrowAnimation;
   late VideoPlayerController _videoController;
   bool _isVideoInitialized = false;
-  double _videoProgress = 0.0;
 
   // Content for each slide
   final List<Map<String, String>> _slideContent = [
     {
       'title': 'Charging Your Omi',
       'subtitle': 'Place your Omi on the charging dock. An orange light indicates that it\'s charging.',
-      'buttonText': 'Got it'
+      'buttonText': 'Got it',
     },
     {
       'title': 'Device Disconnected',
       'subtitle': 'When disconnected, your Omi will show a red light to indicate offline status.',
-      'buttonText': 'Understood'
+      'buttonText': 'Understood',
     },
     {
       'title': 'Device Connected',
       'subtitle': 'A blue light indicates that your Omi is connected and capturing conversations.',
-      'buttonText': 'Perfect'
+      'buttonText': 'Perfect',
     },
     {
       'title': 'Ask Questions',
       'subtitle': 'Long press Omi and speak out to ask questions. Omi will respond through notifications.',
-      'buttonText': 'Cool'
+      'buttonText': 'Cool',
     },
     {
       'title': 'Power Control',
       'subtitle': 'Short press the button to turn your Omi device on or off as needed.',
-      'buttonText': 'Let\'s Go!'
+      'buttonText': 'Let\'s Go!',
     },
   ];
 
   @override
   void initState() {
     super.initState();
-    _controller = AnimationController(
-      duration: const Duration(milliseconds: 600),
-      vsync: this,
-    )..repeat(reverse: true);
+    _controller = AnimationController(duration: const Duration(milliseconds: 600), vsync: this)..repeat(reverse: true);
 
     _arrowAnimation = Tween<double>(
       begin: 0,
       end: 4,
-    ).animate(CurvedAnimation(
-      parent: _controller,
-      curve: Curves.easeInOut,
-    ));
+    ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeInOut));
 
     _initializeVideo();
   }
@@ -88,30 +82,14 @@ class _DeviceOnboardingPageState extends State<DeviceOnboardingPage> with Single
       });
       _videoController.setLooping(true);
       _videoController.play();
-
-      // Listen to video progress
-      _videoController.addListener(_updateVideoProgress);
     } catch (e) {
       print('Error initializing video: $e');
-    }
-  }
-
-  void _updateVideoProgress() {
-    if (_videoController.value.isInitialized) {
-      final position = _videoController.value.position;
-      final duration = _videoController.value.duration;
-      if (duration.inMilliseconds > 0) {
-        setState(() {
-          _videoProgress = position.inMilliseconds / duration.inMilliseconds;
-        });
-      }
     }
   }
 
   @override
   void dispose() {
     _controller.dispose();
-    _videoController.removeListener(_updateVideoProgress);
     _videoController.dispose();
     super.dispose();
   }
@@ -142,9 +120,7 @@ class _DeviceOnboardingPageState extends State<DeviceOnboardingPage> with Single
                               child: VideoPlayer(_videoController),
                             ),
                           )
-                        : Container(
-                            color: Colors.black,
-                          ),
+                        : Container(color: Colors.black),
                   ),
                 ),
 
@@ -154,10 +130,7 @@ class _DeviceOnboardingPageState extends State<DeviceOnboardingPage> with Single
                   padding: EdgeInsets.fromLTRB(32, 24, 32, 20),
                   decoration: const BoxDecoration(
                     color: Colors.black,
-                    borderRadius: BorderRadius.only(
-                      topLeft: Radius.circular(40),
-                      topRight: Radius.circular(40),
-                    ),
+                    borderRadius: BorderRadius.only(topLeft: Radius.circular(40), topRight: Radius.circular(40)),
                   ),
                   child: SafeArea(
                     top: false,
@@ -180,7 +153,7 @@ class _DeviceOnboardingPageState extends State<DeviceOnboardingPage> with Single
                         Text(
                           content['subtitle']!,
                           style: TextStyle(
-                            color: Colors.white.withOpacity(0.7),
+                            color: Colors.white.withValues(alpha: 0.7),
                             fontSize: 16,
                             height: 1.4,
                             fontFamily: 'Manrope',
@@ -202,9 +175,7 @@ class _DeviceOnboardingPageState extends State<DeviceOnboardingPage> with Single
                             style: ElevatedButton.styleFrom(
                               backgroundColor: Colors.white,
                               foregroundColor: Colors.black,
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(28),
-                              ),
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
                             ),
                             child: Row(
                               mainAxisAlignment: MainAxisAlignment.center,
@@ -247,14 +218,11 @@ class _DeviceOnboardingPageState extends State<DeviceOnboardingPage> with Single
                   width: 36,
                   height: 36,
                   margin: const EdgeInsets.all(8),
-                  decoration: BoxDecoration(
-                    color: Colors.grey.withValues(alpha: 0.3),
-                    shape: BoxShape.circle,
-                  ),
+                  decoration: BoxDecoration(color: Colors.grey.withValues(alpha: 0.3), shape: BoxShape.circle),
                   child: IconButton(
                     padding: EdgeInsets.zero,
                     onPressed: widget.onBack,
-                    icon: const FaIcon(FontAwesomeIcons.arrowLeft, size: 16.0, color: Colors.white),
+                    icon: FaIcon(FontAwesomeIcons.arrowLeft, size: 16.0, color: Colors.white),
                   ),
                 ),
               ),

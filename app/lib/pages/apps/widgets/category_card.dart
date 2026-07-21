@@ -1,17 +1,14 @@
 import 'package:flutter/material.dart';
+
 import 'package:omi/backend/schema/app.dart';
+import 'package:omi/utils/app_localizations_helper.dart';
 
 class CategoryCard extends StatelessWidget {
   final Category category;
   final int appCount;
   final VoidCallback onTap;
 
-  const CategoryCard({
-    super.key,
-    required this.category,
-    required this.appCount,
-    required this.onTap,
-  });
+  const CategoryCard({super.key, required this.category, required this.appCount, required this.onTap});
 
   IconData _getCategoryIcon(String categoryId) {
     switch (categoryId.toLowerCase()) {
@@ -108,7 +105,7 @@ class CategoryCard extends StatelessWidget {
       onTap: onTap,
       child: Container(
         decoration: BoxDecoration(
-          color: const Color(0xFF1F1F25).withOpacity(0.3),
+          color: const Color(0xFF1F1F25).withValues(alpha: 0.3),
           borderRadius: BorderRadius.circular(16),
         ),
         child: Padding(
@@ -119,23 +116,15 @@ class CategoryCard extends StatelessWidget {
               Container(
                 padding: const EdgeInsets.all(16),
                 decoration: BoxDecoration(
-                  color: categoryColor.withOpacity(0.15),
+                  color: categoryColor.withValues(alpha: 0.15),
                   borderRadius: BorderRadius.circular(16),
                 ),
-                child: Icon(
-                  categoryIcon,
-                  size: 28,
-                  color: categoryColor,
-                ),
+                child: Icon(categoryIcon, size: 28, color: categoryColor),
               ),
               const SizedBox(height: 16),
               Text(
-                category.title,
-                style: const TextStyle(
-                  fontSize: 16,
-                  fontWeight: FontWeight.w600,
-                  color: Colors.white,
-                ),
+                category.getLocalizedTitle(context),
+                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: Colors.white),
                 textAlign: TextAlign.center,
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
@@ -143,11 +132,7 @@ class CategoryCard extends StatelessWidget {
               const SizedBox(height: 6),
               Text(
                 '$appCount app${appCount == 1 ? '' : 's'}',
-                style: TextStyle(
-                  fontSize: 13,
-                  color: Colors.grey.shade400,
-                  fontWeight: FontWeight.w500,
-                ),
+                style: TextStyle(fontSize: 13, color: Colors.grey.shade400, fontWeight: FontWeight.w500),
               ),
             ],
           ),

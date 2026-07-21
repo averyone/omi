@@ -1,11 +1,16 @@
 import 'package:flutter/material.dart';
+
+import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/gen/assets.gen.dart';
+import 'package:omi/utils/device.dart';
 
 class DeviceAnimationWidget extends StatefulWidget {
   final bool animatedBackground;
   final double sizeMultiplier;
   final bool isConnected;
   final String? deviceName;
+  final DeviceType? deviceType;
+  final String? modelNumber;
 
   const DeviceAnimationWidget({
     super.key,
@@ -13,6 +18,8 @@ class DeviceAnimationWidget extends StatefulWidget {
     this.animatedBackground = true,
     this.isConnected = false,
     this.deviceName,
+    this.deviceType,
+    this.modelNumber,
   });
 
   @override
@@ -25,10 +32,7 @@ class _DeviceAnimationWidgetState extends State<DeviceAnimationWidget> with Tick
 
   @override
   void initState() {
-    _controller = AnimationController(
-      duration: const Duration(milliseconds: 2000),
-      vsync: this,
-    )..repeat(reverse: true);
+    _controller = AnimationController(duration: const Duration(milliseconds: 2000), vsync: this)..repeat(reverse: true);
     _animation = Tween<double>(begin: 1, end: 0.8).animate(_controller);
     super.initState();
   }
@@ -47,26 +51,26 @@ class _DeviceAnimationWidgetState extends State<DeviceAnimationWidget> with Tick
         child: Stack(
           alignment: Alignment.center,
           children: [
-            Image.asset(
-              Assets.images.stars.path,
-            ),
             widget.animatedBackground
-                ? AnimatedBuilder(
-                    animation: _animation,
-                    builder: (context, child) {
-                      return Image.asset(
+                ? RepaintBoundary(
+                    child: AnimatedBuilder(
+                      animation: _animation,
+                      builder: (context, child) {
+                        return Transform.scale(scale: _animation.value, child: child);
+                      },
+                      child: Image.asset(
                         Assets.images.blob.path,
-                        height: (MediaQuery.sizeOf(context).height <= 700 ? 360 : 390) *
-                            widget.sizeMultiplier *
-                            _animation.value,
-                        width: (MediaQuery.sizeOf(context).height <= 700 ? 360 : 390) *
-                            widget.sizeMultiplier *
-                            _animation.value,
-                      );
-                    },
+                        height: (MediaQuery.sizeOf(context).height <= 700 ? 360 : 390) * widget.sizeMultiplier,
+                        width: (MediaQuery.sizeOf(context).height <= 700 ? 360 : 390) * widget.sizeMultiplier,
+                        cacheHeight:
+                            ((MediaQuery.sizeOf(context).height <= 700 ? 360 : 390) * widget.sizeMultiplier).round(),
+                        cacheWidth:
+                            ((MediaQuery.sizeOf(context).height <= 700 ? 360 : 390) * widget.sizeMultiplier).round(),
+                      ),
+                    ),
                   )
-                : Container(),
-            _buildDeviceImage()
+                : const SizedBox.shrink(),
+            _buildDeviceImage(),
           ],
         ),
       ),
@@ -74,57 +78,52 @@ class _DeviceAnimationWidgetState extends State<DeviceAnimationWidget> with Tick
   }
 
   Widget _buildDeviceImage() {
+    final pixelRatio = MediaQuery.of(context).devicePixelRatio;
     final double imageHeight = (MediaQuery.sizeOf(context).height <= 700 ? 130 : 160) * widget.sizeMultiplier;
     final double imageWidth = (MediaQuery.sizeOf(context).height <= 700 ? 130 : 160) * widget.sizeMultiplier;
 
-    // Special stacked approach for "Omi" device
-    if (widget.deviceName != null && widget.deviceName == 'Omi') {
+    // Special handling for Omi device with connection indicator
+    if ((widget.deviceType == DeviceType.omi || widget.deviceName == 'Omi') && !widget.isConnected) {
       return Stack(
         alignment: Alignment.center,
         children: [
-          // Bottom layer: turned-off image (always visible)
+          // Base image
           Image.asset(
             Assets.images.omiWithoutRopeTurnedOff.path,
             height: imageHeight,
             width: imageWidth,
+            cacheHeight: (imageHeight * pixelRatio).round(),
+            cacheWidth: (imageWidth * pixelRatio).round(),
           ),
-          // Top layer: turned-on image (visible only when connected)
+          // Blue light overlay when connected TODO: improve this or just use the image itself
           AnimatedOpacity(
             opacity: widget.isConnected ? 1.0 : 0.0,
             duration: const Duration(milliseconds: 300),
-            child: Image.asset(
-              Assets.images.omiWithoutRope.path,
-              height: imageHeight,
-              width: imageWidth,
+            child: Container(
+              width: imageWidth * 0.06,
+              height: imageHeight * 0.06,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: Colors.blue.withValues(alpha: 0.8),
+                boxShadow: [BoxShadow(color: Colors.blue.withValues(alpha: 0.5), blurRadius: 8, spreadRadius: 2)],
+              ),
             ),
           ),
         ],
       );
     }
 
-    // For all other devices, use the regular single image approach
     return Image.asset(
-      _getImagePath(),
+      DeviceUtils.getDeviceImagePathWithState(
+        deviceType: widget.deviceType,
+        modelNumber: widget.modelNumber,
+        deviceName: widget.deviceName,
+        isConnected: widget.isConnected,
+      ),
       height: imageHeight,
       width: imageWidth,
+      cacheHeight: (imageHeight * pixelRatio).round(),
+      cacheWidth: (imageWidth * pixelRatio).round(),
     );
-  }
-
-  String _getImagePath() {
-    // Show device image for both connected and paired devices
-    if (widget.deviceName != null && widget.deviceName!.contains('Glass')) {
-      return Assets.images.omiGlass.path;
-    }
-
-    if (widget.deviceName != null && widget.deviceName!.contains('Omi DevKit')) {
-      return Assets.images.omiDevkitWithoutRope.path;
-    }
-
-    // Default to omi device image, fallback to hero logo only if no device name
-    if (widget.deviceName != null && widget.deviceName!.isNotEmpty) {
-      return Assets.images.omiWithoutRope.path;
-    }
-
-    return Assets.images.herologo.path;
   }
 }

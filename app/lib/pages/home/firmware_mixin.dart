@@ -1,33 +1,41 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/widgets.dart';
+
+import 'package:flutter_archive/flutter_archive.dart';
+import 'package:mcumgr_flutter/mcumgr_flutter.dart' as mcumgr;
 import 'package:nordic_dfu/nordic_dfu.dart';
-import 'package:omi/backend/http/shared.dart';
-import 'package:omi/backend/schema/bt_device/bt_device.dart';
-import 'package:omi/backend/http/api/device.dart';
-import 'package:omi/providers/device_provider.dart';
-import 'package:omi/utils/device.dart';
-import 'package:omi/utils/manifest/manifest.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
 import 'package:uuid/uuid.dart';
-import 'package:http/http.dart' as http;
-import 'package:mcumgr_flutter/mcumgr_flutter.dart' as mcumgr;
-import 'package:flutter_archive/flutter_archive.dart';
+
+import 'package:omi/backend/http/api/device.dart';
+import 'package:omi/backend/http/shared.dart';
+import 'package:omi/backend/schema/bt_device/bt_device.dart';
+import 'package:omi/providers/device_provider.dart';
+import 'package:omi/utils/device.dart';
+import 'package:omi/utils/firmware_update_build_policy.dart';
+import 'package:omi/utils/logger.dart';
+import 'package:omi/utils/manifest/manifest.dart';
 
 mixin FirmwareMixin<T extends StatefulWidget> on State<T> {
+  FirmwareUpdateBuildPolicy get firmwareUpdatePolicy => FirmwareUpdateBuildPolicy.current;
+
   Map latestFirmwareDetails = {};
   bool isDownloading = false;
   bool isDownloaded = false;
-  int downloadProgress = 1;
+  int downloadProgress = 0;
   bool isInstalling = false;
   bool isInstalled = false;
-  int installProgress = 1;
+  int installProgress = 0;
   bool isLegacySecureDFU = true;
   List<String> otaUpdateSteps = [];
-  final mcumgr.FirmwareUpdateManagerFactory? managerFactory = mcumgr.FirmwareUpdateManagerFactory();
+  late final mcumgr.FirmwareUpdateManagerFactory? managerFactory =
+      firmwareUpdatePolicy.allowsOmiFirmwareUpdate ? mcumgr.FirmwareUpdateManagerFactory() : null;
+  mcumgr.FirmwareUpdateManager? _mcuUpdateManager;
 
   /// Process ZIP file and return firmware image list
   Future<List<mcumgr.Image>> processZipFile(Uint8List zipFileData) async {
@@ -47,10 +55,7 @@ mixin FirmwareMixin<T extends StatefulWidget> on State<T> {
       await destinationDir.create();
 
       // Extract ZIP file
-      await ZipFile.extractToDirectory(
-        zipFile: firmwareFile,
-        destinationDir: destinationDir,
-      );
+      await ZipFile.extractToDirectory(zipFile: firmwareFile, destinationDir: destinationDir);
 
       // Read and parse manifest.json
       final manifestFile = File('${destinationDir.path}/manifest.json');
@@ -63,10 +68,7 @@ mixin FirmwareMixin<T extends StatefulWidget> on State<T> {
       for (final file in manifest.files) {
         final firmwareFile = File('${destinationDir.path}/${file.file}');
         final firmwareFileData = await firmwareFile.readAsBytes();
-        final image = mcumgr.Image(
-          image: file.image,
-          data: firmwareFileData,
-        );
+        final image = mcumgr.Image(image: file.image, data: firmwareFileData);
         firmwareImages.add(image);
       }
 
@@ -80,13 +82,32 @@ mixin FirmwareMixin<T extends StatefulWidget> on State<T> {
   }
 
   Future<void> startDfu(BtDevice btDevice, {bool fileInAssets = false, String? zipFilePath}) async {
+    if (!firmwareUpdatePolicy.allowsOmiFirmwareUpdate) {
+      Logger.debug('Omi firmware updates are unavailable in the Ray-Ban DAT build');
+      return;
+    }
     if (isLegacySecureDFU) {
-      return startLegacyDfu(btDevice, fileInAssets: fileInAssets);
+      return startLegacyDfu(btDevice, fileInAssets: fileInAssets, zipFilePath: zipFilePath);
     }
     return startMCUDfu(btDevice, fileInAssets: fileInAssets, zipFilePath: zipFilePath);
   }
 
+  Future<void> killMcuUpdateManager() async {
+    if (_mcuUpdateManager != null) {
+      try {
+        await _mcuUpdateManager!.kill();
+      } catch (e) {
+        Logger.debug('Error killing update manager: $e');
+      }
+      _mcuUpdateManager = null;
+    }
+  }
+
   Future<void> startMCUDfu(BtDevice btDevice, {bool fileInAssets = false, String? zipFilePath}) async {
+    if (!firmwareUpdatePolicy.allowsOmiFirmwareUpdate) {
+      Logger.debug('MCU firmware updates are unavailable in the Ray-Ban DAT build');
+      return;
+    }
     setState(() {
       isInstalling = true;
     });
@@ -94,31 +115,45 @@ mixin FirmwareMixin<T extends StatefulWidget> on State<T> {
     await Future.delayed(const Duration(seconds: 2));
 
     String firmwareFile = zipFilePath ?? '${(await getApplicationDocumentsDirectory()).path}/firmware.zip';
-    final bytes = await File(firmwareFile).readAsBytes();
+    final file = File(firmwareFile);
+    if (!await file.exists()) {
+      Logger.debug('Firmware file not found: $firmwareFile');
+      if (mounted) {
+        setState(() {
+          isInstalling = false;
+        });
+      }
+      return;
+    }
+    final bytes = await file.readAsBytes();
     const configuration = mcumgr.FirmwareUpgradeConfiguration(
       estimatedSwapTime: Duration(seconds: 0),
       eraseAppSettings: true,
       pipelineDepth: 1,
     );
+
+    await killMcuUpdateManager();
     final updateManager = await managerFactory!.getUpdateManager(btDevice.id);
+    _mcuUpdateManager = updateManager;
     final images = await processZipFile(bytes);
 
     final updateStream = updateManager.setup();
 
     updateStream.listen((state) {
       if (state == mcumgr.FirmwareUpgradeState.success) {
-        debugPrint('update success');
+        Logger.debug('update success');
+        killMcuUpdateManager();
         setState(() {
           isInstalling = false;
           isInstalled = true;
         });
       } else {
-        debugPrint('update state: $state');
+        Logger.debug('update state: $state');
       }
     });
 
     updateManager.progressStream.listen((progress) {
-      debugPrint('progress: $progress');
+      Logger.debug('progress: $progress');
       setState(() {
         installProgress = (progress.bytesSent / progress.imageSize * 100).round();
       });
@@ -127,22 +162,23 @@ mixin FirmwareMixin<T extends StatefulWidget> on State<T> {
     updateManager.logger.logMessageStream
         .where((log) => log.level.rawValue > 1) // Filter debug messages
         .listen((log) {
-      debugPrint('dfu log: ${log.message}');
+      Logger.debug('dfu log: ${log.message}');
     });
 
-    await updateManager.update(
-      images,
-      configuration: configuration,
-    );
+    await updateManager.update(images, configuration: configuration);
   }
 
-  Future<void> startLegacyDfu(BtDevice btDevice, {bool fileInAssets = false}) async {
+  Future<void> startLegacyDfu(BtDevice btDevice, {bool fileInAssets = false, String? zipFilePath}) async {
+    if (!firmwareUpdatePolicy.allowsOmiFirmwareUpdate) {
+      Logger.debug('Legacy firmware updates are unavailable in the Ray-Ban DAT build');
+      return;
+    }
     setState(() {
       isInstalling = true;
     });
     await Provider.of<DeviceProvider>(context, listen: false).prepareDFU();
     await Future.delayed(const Duration(seconds: 2));
-    String firmwareFile = '${(await getApplicationDocumentsDirectory()).path}/firmware.zip';
+    String firmwareFile = zipFilePath ?? '${(await getApplicationDocumentsDirectory()).path}/firmware.zip';
     NordicDfu dfu = NordicDfu();
     await dfu.startDfu(
       btDevice.id,
@@ -155,18 +191,15 @@ mixin FirmwareMixin<T extends StatefulWidget> on State<T> {
         forceScanningForNewAddressInLegacyDfu: true,
         connectionTimeout: 60,
       ),
-      androidSpecialParameter: const AndroidSpecialParameter(
-        packetReceiptNotificationsEnabled: true,
-        rebootTime: 1000,
-      ),
+      androidSpecialParameter: const AndroidSpecialParameter(packetReceiptNotificationsEnabled: true, rebootTime: 1000),
       onProgressChanged: (deviceAddress, percent, speed, avgSpeed, currentPart, partsTotal) {
-        debugPrint('deviceAddress: $deviceAddress, percent: $percent');
+        Logger.debug('deviceAddress: $deviceAddress, percent: $percent');
         setState(() {
           installProgress = percent.toInt();
         });
       },
       onError: (deviceAddress, error, errorType, message) {
-        debugPrint('deviceAddress: $deviceAddress, error: $error, errorType: $errorType, message: $message');
+        Logger.debug('deviceAddress: $deviceAddress, error: $error, errorType: $errorType, message: $message');
         setState(() {
           isInstalling = false;
         });
@@ -174,14 +207,14 @@ mixin FirmwareMixin<T extends StatefulWidget> on State<T> {
         final deviceProvider = Provider.of<DeviceProvider>(context, listen: false);
         deviceProvider.resetFirmwareUpdateState();
       },
-      onDeviceConnecting: (deviceAddress) => debugPrint('deviceAddress: $deviceAddress, onDeviceConnecting'),
-      onDeviceConnected: (deviceAddress) => debugPrint('deviceAddress: $deviceAddress, onDeviceConnected'),
-      onDfuProcessStarting: (deviceAddress) => debugPrint('deviceAddress: $deviceAddress, onDfuProcessStarting'),
-      onDfuProcessStarted: (deviceAddress) => debugPrint('deviceAddress: $deviceAddress, onDfuProcessStarted'),
-      onEnablingDfuMode: (deviceAddress) => debugPrint('deviceAddress: $deviceAddress, onEnablingDfuMode'),
-      onFirmwareValidating: (deviceAddress) => debugPrint('address: $deviceAddress, onFirmwareValidating'),
+      onDeviceConnecting: (deviceAddress) => Logger.debug('deviceAddress: $deviceAddress, onDeviceConnecting'),
+      onDeviceConnected: (deviceAddress) => Logger.debug('deviceAddress: $deviceAddress, onDeviceConnected'),
+      onDfuProcessStarting: (deviceAddress) => Logger.debug('deviceAddress: $deviceAddress, onDfuProcessStarting'),
+      onDfuProcessStarted: (deviceAddress) => Logger.debug('deviceAddress: $deviceAddress, onDfuProcessStarted'),
+      onEnablingDfuMode: (deviceAddress) => Logger.debug('deviceAddress: $deviceAddress, onEnablingDfuMode'),
+      onFirmwareValidating: (deviceAddress) => Logger.debug('address: $deviceAddress, onFirmwareValidating'),
       onDfuCompleted: (deviceAddress) {
-        debugPrint('deviceAddress: $deviceAddress, onDfuCompleted');
+        Logger.debug('deviceAddress: $deviceAddress, onDfuCompleted');
         setState(() {
           isInstalling = false;
           isInstalled = true;
@@ -190,11 +223,12 @@ mixin FirmwareMixin<T extends StatefulWidget> on State<T> {
     );
   }
 
-  Future getLatestVersion(
-      {required String deviceModelNumber,
-      required String firmwareRevision,
-      required String hardwareRevision,
-      required String manufacturerName}) async {
+  Future getLatestVersion({
+    required String deviceModelNumber,
+    required String firmwareRevision,
+    required String hardwareRevision,
+    required String manufacturerName,
+  }) async {
     latestFirmwareDetails = await getLatestFirmwareVersion(
       deviceModelNumber: deviceModelNumber,
       firmwareRevision: firmwareRevision,
@@ -209,77 +243,103 @@ mixin FirmwareMixin<T extends StatefulWidget> on State<T> {
     }
   }
 
+  Future getStableVersion({required String deviceModelNumber}) async {
+    latestFirmwareDetails = await getStableFirmwareVersion(deviceModelNumber: deviceModelNumber);
+    if (latestFirmwareDetails['ota_update_steps'] != null) {
+      otaUpdateSteps = List<String>.from(latestFirmwareDetails['ota_update_steps']);
+    }
+    if (latestFirmwareDetails['is_legacy_secure_dfu'] != null) {
+      isLegacySecureDFU = latestFirmwareDetails['is_legacy_secure_dfu'];
+    }
+  }
+
   Future<(String, bool, String)> shouldUpdateFirmware({required String currentFirmware}) async {
     return DeviceUtils.shouldUpdateFirmware(
-        currentFirmware: currentFirmware, latestFirmwareDetails: latestFirmwareDetails);
+      currentFirmware: currentFirmware,
+      latestFirmwareDetails: latestFirmwareDetails,
+    );
   }
 
   Future downloadFirmware() async {
+    final deviceProvider = Provider.of<DeviceProvider>(context, listen: false);
     final zipUrl = latestFirmwareDetails['zip_url'];
     if (zipUrl == null) {
-      debugPrint('Error: zip_url is null in latestFirmwareDetails');
+      Logger.debug('Error: zip_url is null in latestFirmwareDetails');
       setState(() {
         isDownloading = false;
       });
       // Reset firmware update state on error
-      final deviceProvider = Provider.of<DeviceProvider>(context, listen: false);
       deviceProvider.resetFirmwareUpdateState();
       return;
     }
 
-    var response = makeRawApiCall(method: 'GET', url: zipUrl);
     String dir = (await getApplicationDocumentsDirectory()).path;
 
-    List<List<int>> chunks = [];
-    int downloaded = 0;
     setState(() {
       isDownloading = true;
       isDownloaded = false;
+      downloadProgress = 0;
     });
-    response.asStream().listen((http.StreamedResponse r) {
-      r.stream.listen((List<int> chunk) {
-        // Display percentage of completion
-        debugPrint('downloadPercentage: ${downloaded / r.contentLength! * 100}');
-        setState(() {
-          downloadProgress = (downloaded / r.contentLength! * 100).toInt();
-        });
-        chunks.add(chunk);
-        downloaded += chunk.length;
-      }, onDone: () async {
-        // Display percentage of completion
-        debugPrint('downloadPercentage: ${downloaded / r.contentLength! * 100}');
 
-        // Save the file
-        File file = File('$dir/firmware.zip');
-        final Uint8List bytes = Uint8List(r.contentLength!);
-        int offset = 0;
-        for (List<int> chunk in chunks) {
-          bytes.setRange(offset, offset + chunk.length, chunk);
-          offset += chunk.length;
-        }
-        await file.writeAsBytes(bytes);
+    try {
+      final r = await makeRawApiCall(method: 'GET', url: zipUrl);
+      final completer = Completer<void>();
+      final int? totalBytes = r.contentLength;
+
+      List<List<int>> chunks = [];
+      int downloaded = 0;
+
+      r.stream.listen(
+        (List<int> chunk) {
+          chunks.add(chunk);
+          downloaded += chunk.length;
+          if (totalBytes != null && totalBytes > 0) {
+            Logger.debug('downloadPercentage: ${downloaded / totalBytes * 100}');
+            setState(() {
+              downloadProgress = (downloaded / totalBytes * 100).toInt();
+            });
+          }
+        },
+        onDone: () async {
+          try {
+            Logger.debug('downloadPercentage: 100');
+            File file = File('$dir/firmware.zip');
+            final Uint8List bytes = Uint8List(downloaded);
+            int offset = 0;
+            for (List<int> chunk in chunks) {
+              bytes.setRange(offset, offset + chunk.length, chunk);
+              offset += chunk.length;
+            }
+            await file.writeAsBytes(bytes);
+            setState(() {
+              isDownloading = false;
+              isDownloaded = true;
+              downloadProgress = 100;
+            });
+            completer.complete();
+          } catch (e) {
+            completer.completeError(e);
+          }
+        },
+        onError: (error) {
+          Logger.debug('Download error: $error');
+          setState(() {
+            isDownloading = false;
+          });
+          deviceProvider.resetFirmwareUpdateState();
+          completer.completeError(error);
+        },
+      );
+
+      await completer.future;
+    } catch (e) {
+      Logger.debug('Download error: $e');
+      if (mounted) {
         setState(() {
           isDownloading = false;
-          isDownloaded = true;
         });
-        return;
-      }, onError: (error) {
-        debugPrint('Download error: $error');
-        setState(() {
-          isDownloading = false;
-        });
-        // Reset firmware update state on error
-        final deviceProvider = Provider.of<DeviceProvider>(context, listen: false);
-        deviceProvider.resetFirmwareUpdateState();
-      });
-    }, onError: (error) {
-      debugPrint('Download error: $error');
-      setState(() {
-        isDownloading = false;
-      });
-      // Reset firmware update state on error
-      final deviceProvider = Provider.of<DeviceProvider>(context, listen: false);
+      }
       deviceProvider.resetFirmwareUpdateState();
-    });
+    }
   }
 }

@@ -1,9 +1,9 @@
-import 'package:firebase_crashlytics/firebase_crashlytics.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:omi/utils/platform/platform_service.dart';
-import 'package:omi/utils/debugging/crash_reporter.dart';
 
-class CrashlyticsManager implements CrashReporter {
+import 'package:firebase_crashlytics/firebase_crashlytics.dart';
+
+class CrashlyticsManager {
   static final CrashlyticsManager _instance = CrashlyticsManager._internal();
   static CrashlyticsManager get instance => _instance;
 
@@ -14,79 +14,68 @@ class CrashlyticsManager implements CrashReporter {
   }
 
   static Future<void> init() async {
-    await FirebaseCrashlytics.instance.setCrashlyticsCollectionEnabled(true);
+    // Disable Crashlytics collection in debug mode
+    if (kDebugMode) {
+      await FirebaseCrashlytics.instance.setCrashlyticsCollectionEnabled(false);
+    } else {
+      await FirebaseCrashlytics.instance.setCrashlyticsCollectionEnabled(true);
+    }
   }
 
-  @override
   void identifyUser(String email, String name, String userId) {
-    PlatformService.executeIfSupported(
-      true,
-      () async {
-        await FirebaseCrashlytics.instance.setUserIdentifier(userId);
-        if (email.isNotEmpty) {
-          await FirebaseCrashlytics.instance.setCustomKey('user_email', email);
-        }
-        if (name.isNotEmpty) {
-          await FirebaseCrashlytics.instance.setCustomKey('user_name', name);
-        }
-      },
-    );
+    FirebaseCrashlytics.instance.setUserIdentifier(userId);
+    if (email.isNotEmpty) {
+      FirebaseCrashlytics.instance.setCustomKey('user_email', email);
+    }
+    if (name.isNotEmpty) {
+      FirebaseCrashlytics.instance.setCustomKey('user_name', name);
+    }
   }
 
-  @override
   void logInfo(String message) {
-    PlatformService.executeIfSupported(true, () => FirebaseCrashlytics.instance.log(message));
+    FirebaseCrashlytics.instance.log(message);
   }
 
-  @override
   void logError(String message) {
-    PlatformService.executeIfSupported(true, () => FirebaseCrashlytics.instance.log('ERROR: $message'));
+    FirebaseCrashlytics.instance.log('ERROR: $message');
   }
 
-  @override
   void logWarn(String message) {
-    PlatformService.executeIfSupported(true, () => FirebaseCrashlytics.instance.log('WARN: $message'));
+    FirebaseCrashlytics.instance.log('WARN: $message');
   }
 
-  @override
   void logDebug(String message) {
-    PlatformService.executeIfSupported(true, () => FirebaseCrashlytics.instance.log('DEBUG: $message'));
+    FirebaseCrashlytics.instance.log('DEBUG: $message');
   }
 
-  @override
   void logVerbose(String message) {
-    PlatformService.executeIfSupported(true, () => FirebaseCrashlytics.instance.log('VERBOSE: $message'));
+    FirebaseCrashlytics.instance.log('VERBOSE: $message');
   }
 
-  @override
   void setUserAttribute(String key, String value) {
-    PlatformService.executeIfSupported(true, () => FirebaseCrashlytics.instance.setCustomKey(key, value));
+    FirebaseCrashlytics.instance.setCustomKey(key, value);
   }
 
-  @override
   void setEnabled(bool isEnabled) {
-    PlatformService.executeIfSupported(true, () async {
-      await FirebaseCrashlytics.instance.setCrashlyticsCollectionEnabled(isEnabled);
-    });
+    FirebaseCrashlytics.instance.setCrashlyticsCollectionEnabled(isEnabled);
   }
 
-  @override
-  Future<void> reportCrash(Object exception, StackTrace stackTrace, {Map<String, String>? userAttributes}) async {
-    await PlatformService.executeIfSupportedAsync(true, () async {
-      if (userAttributes != null) {
-        for (final entry in userAttributes.entries) {
-          await FirebaseCrashlytics.instance.setCustomKey(entry.key, entry.value);
-        }
+  Future<void> reportCrash(
+    Object exception,
+    StackTrace stackTrace, {
+    Map<String, String>? userAttributes,
+  }) async {
+    if (userAttributes != null) {
+      for (final entry in userAttributes.entries) {
+        await FirebaseCrashlytics.instance.setCustomKey(entry.key, entry.value);
       }
-      await FirebaseCrashlytics.instance.recordError(exception, stackTrace);
-    });
+    }
+    await FirebaseCrashlytics.instance.recordError(exception, stackTrace);
   }
 
-  @override
   NavigatorObserver? getNavigatorObserver() {
     return null;
   }
 
-  @override
   bool get isSupported => true;
 }

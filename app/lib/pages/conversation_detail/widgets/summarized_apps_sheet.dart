@@ -1,17 +1,23 @@
+import 'package:omi/utils/platform/platform_manager.dart';
+import 'package:flutter/cupertino.dart';
+import 'package:flutter/material.dart';
+
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:collection/collection.dart';
-import 'package:flutter/material.dart';
+import 'package:font_awesome_flutter/font_awesome_flutter.dart';
+import 'package:provider/provider.dart';
+import 'package:omi/widgets/shimmer_with_timeout.dart';
+
+import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/app.dart';
-import 'package:omi/gen/assets.gen.dart';
-import 'package:omi/pages/apps/add_app.dart';
-import 'package:omi/pages/apps/page.dart';
-import 'package:omi/pages/apps/widgets/category_apps_page.dart';
+import 'package:omi/pages/apps/widgets/capability_apps_page.dart';
+import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/pages/conversation_detail/conversation_detail_provider.dart';
+import 'package:omi/pages/conversation_detail/widgets/create_template_bottom_sheet.dart';
 import 'package:omi/providers/app_provider.dart';
-import 'package:omi/utils/analytics/mixpanel.dart';
+import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/other/temp.dart';
 import 'package:omi/widgets/extensions/string.dart';
-import 'package:provider/provider.dart';
 
 class SummarizedAppsBottomSheet extends StatelessWidget {
   const SummarizedAppsBottomSheet({super.key});
@@ -30,7 +36,7 @@ class SummarizedAppsBottomSheet extends StatelessWidget {
             final currentAppId = summarizedApp?.appId;
             final conversationId = provider.conversation.id;
 
-            MixpanelManager().summarizedAppSheetViewed(
+            PlatformManager.instance.analytics.summarizedAppSheetViewed(
               conversationId: conversationId,
               currentSummarizedAppId: currentAppId,
             );
@@ -40,10 +46,7 @@ class SummarizedAppsBottomSheet extends StatelessWidget {
               children: [
                 const _SheetHeader(),
                 Expanded(
-                  child: _AppsList(
-                    provider: provider,
-                    currentAppId: currentAppId,
-                  ),
+                  child: _AppsList(provider: provider, currentAppId: currentAppId),
                 ),
               ],
             );
@@ -58,10 +61,7 @@ class _SheetContainer extends StatelessWidget {
   final ScrollController scrollController;
   final List<Widget> children;
 
-  const _SheetContainer({
-    required this.scrollController,
-    required this.children,
-  });
+  const _SheetContainer({required this.scrollController, required this.children});
 
   @override
   Widget build(BuildContext context) {
@@ -88,27 +88,15 @@ class _SheetHeader extends StatelessWidget {
           width: 40,
           height: 4,
           margin: const EdgeInsets.symmetric(vertical: 8),
-          decoration: BoxDecoration(
-            color: Colors.grey[600],
-            borderRadius: BorderRadius.circular(2),
-          ),
+          decoration: BoxDecoration(color: Colors.grey[600], borderRadius: BorderRadius.circular(2)),
         ),
 
         // Title
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            const Text(
-              'Conversation Analysis',
-              style: TextStyle(
-                fontSize: 18,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-            IconButton(
-              icon: const Icon(Icons.close),
-              onPressed: () => Navigator.pop(context),
-            ),
+            Text(context.l10n.summaryTemplate, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            IconButton(icon: const Icon(Icons.close), onPressed: () => Navigator.pop(context)),
           ],
         ),
         const SizedBox(height: 16),
@@ -117,130 +105,248 @@ class _SheetHeader extends StatelessWidget {
   }
 }
 
-class _AppsList extends StatelessWidget {
+class _AppsList extends StatefulWidget {
   final ConversationDetailProvider provider;
   final String? currentAppId;
 
-  const _AppsList({
-    required this.provider,
-    required this.currentAppId,
-  });
+  const _AppsList({required this.provider, required this.currentAppId});
 
+  @override
+  State<_AppsList> createState() => _AppsListState();
+}
+
+class _AppsListState extends State<_AppsList> {
   // Track app installation state
   static final Map<String, bool> _installingApps = {};
 
   @override
-  Widget build(BuildContext context) {
-    final availableApps = provider.appsList.where((app) => app.worksWithMemories() && app.enabled).toList();
-    final suggestedAppIds = provider.getSuggestedApps();
-    final lastUsedApp = provider.getLastUsedSummarizationApp();
+  void initState() {
+    super.initState();
+    _fetchApps();
+    // Listen to provider changes to rebuild when apps are fetched
+    widget.provider.addListener(_onProviderUpdate);
+  }
 
-    // Convert suggested app IDs to App objects
-    final suggestedApps = suggestedAppIds
-        .map((appId) => provider.appsList.firstWhereOrNull((app) => app.id == appId))
-        .where((app) => app != null)
-        .cast<App>()
-        .toList();
+  @override
+  void dispose() {
+    widget.provider.removeListener(_onProviderUpdate);
+    super.dispose();
+  }
 
-    // Filter out suggested apps and last used app from other apps
-    final otherApps = availableApps
-        .where((app) => !provider.isAppSuggested(app.id) && (lastUsedApp == null || app.id != lastUsedApp.id))
-        .toList();
+  void _onProviderUpdate() {
+    if (mounted) {
+      setState(() {});
+    }
+  }
 
+  Future<void> _fetchApps() async {
+    try {
+      await Future.wait([
+        widget.provider.fetchAndCacheSuggestedApps(),
+        widget.provider.fetchAndCacheEnabledConversationApps(),
+      ]);
+    } catch (e) {
+      Logger.debug('Error fetching apps: $e');
+    }
+  }
+
+  Widget _buildShimmerLoading() {
     return ListView(
       children: [
-        // Auto option
-        _AppListItem(
-          app: null,
-          isSelected: currentAppId == null,
-          onTap: () => _handleAutoAppTap(context),
-          trailingIcon: const Icon(Icons.autorenew, color: Colors.white, size: 20),
-          subtitle: 'Let Omi automatically choose the best app for this summary.',
-          provider: provider,
+        // Auto option shimmer
+        _buildShimmerListItem(),
+
+        // Suggested Apps section shimmer
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+          child: Text(
+            context.l10n.suggestedTemplates,
+            style: const TextStyle(color: Colors.grey, fontSize: 14, fontWeight: FontWeight.w600),
+          ),
         ),
+        _buildShimmerListItem(),
+        _buildShimmerListItem(),
 
-        // Suggested Apps section
-        if (suggestedApps.isNotEmpty) ...[
-          const Padding(
-            padding: EdgeInsets.fromLTRB(16, 16, 16, 8),
-            child: Text(
-              'Suggested Apps',
-              style: TextStyle(
-                color: Colors.grey,
-                fontSize: 14,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
+        // Other Apps section shimmer
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+          child: Text(
+            context.l10n.availableTemplates,
+            style: const TextStyle(color: Colors.grey, fontSize: 14, fontWeight: FontWeight.w600),
           ),
-          ...suggestedApps.map((app) {
-            final isAvailable = provider.isSuggestedAppAvailable(app.id);
-            final isInstalling = _AppsList._installingApps[app.id] == true;
-            return _AppListItem(
-              app: app,
-              isSelected: app.id == currentAppId,
-              onTap: () => isAvailable ? _handleAppTap(context, app) : _handleUnavailableAppTap(context, app),
-              isSuggested: true,
-              isInstalling: isInstalling,
-              provider: provider,
-            );
-          }),
-        ],
-
-        // Other Apps section (includes last used app at top)
-        if (otherApps.isNotEmpty || lastUsedApp != null) ...[
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-            child: Text(
-              suggestedApps.isNotEmpty ? 'Other Apps' : 'Available Apps',
-              style: const TextStyle(
-                color: Colors.grey,
-                fontSize: 14,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ),
-          // Show last used app first if available
-          if (lastUsedApp != null)
-            _AppListItem(
-              app: lastUsedApp,
-              isSelected: lastUsedApp.id == currentAppId,
-              onTap: () => _handleAppTap(context, lastUsedApp),
-              isLastUsed: true,
-              provider: provider,
-            ),
-          // Then show other apps
-          ...otherApps.map((app) => _AppListItem(
-                app: app,
-                isSelected: app.id == currentAppId,
-                onTap: () => _handleAppTap(context, app),
-                provider: provider,
-              )),
-        ],
-
-        // Create Template option
-        const _CreateTemplateListItem(),
-
-        // Enable Apps option
-        const _EnableAppsListItem(),
+        ),
+        _buildShimmerListItem(),
+        _buildShimmerListItem(),
+        _buildShimmerListItem(),
       ],
     );
   }
 
-  void _handleAutoAppTap(BuildContext context) async {
-    Navigator.pop(context);
-    final provider = context.read<ConversationDetailProvider>();
-    final previousAppId = provider.getSummarizedApp()?.appId;
-    final conversationId = provider.conversation.id;
-
-    MixpanelManager().summarizedAppSelected(
-      conversationId: conversationId,
-      selectedAppId: 'auto',
-      previousAppId: previousAppId,
+  Widget _buildShimmerListItem() {
+    return ShimmerWithTimeout(
+      baseColor: const Color(0xFF1F1F25),
+      highlightColor: const Color(0xFF35343B),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+        child: Row(
+          children: [
+            // Leading icon placeholder
+            Container(
+              width: 32,
+              height: 32,
+              decoration: BoxDecoration(color: const Color(0xFF1F1F25), borderRadius: BorderRadius.circular(16)),
+            ),
+            const SizedBox(width: 16),
+            // Title and subtitle placeholders
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Container(
+                    width: double.infinity,
+                    height: 16,
+                    decoration: BoxDecoration(color: const Color(0xFF1F1F25), borderRadius: BorderRadius.circular(4)),
+                  ),
+                  const SizedBox(height: 8),
+                  Container(
+                    width: 200,
+                    height: 12,
+                    decoration: BoxDecoration(color: const Color(0xFF1F1F25), borderRadius: BorderRadius.circular(4)),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
     );
+  }
 
-    provider.clearSelectedAppForReprocessing();
-    await provider.reprocessConversation();
-    return;
+  @override
+  Widget build(BuildContext context) {
+    final enabledApps = widget.provider.cachedEnabledConversationApps;
+    final suggestedApps = widget.provider.cachedSuggestedApps;
+
+    final isLoading = enabledApps.isEmpty && suggestedApps.isEmpty;
+
+    if (isLoading) {
+      return _buildShimmerLoading();
+    }
+
+    // Get preferred (default) app ID and find it in enabled apps
+    final preferredAppId = widget.provider.preferredSummarizationAppId;
+    final preferredApp = preferredAppId != null && preferredAppId.isNotEmpty
+        ? enabledApps.firstWhereOrNull((app) => app.id == preferredAppId)
+        : null;
+
+    // Get last used app ID and find it in the enabled apps
+    final lastUsedAppId = widget.provider.getLastUsedSummarizationAppId();
+    final lastUsedApp = lastUsedAppId != null ? enabledApps.firstWhereOrNull((app) => app.id == lastUsedAppId) : null;
+
+    final suggestedAppIds = suggestedApps.map((app) => app.id).toList();
+    final currentUserId = SharedPreferencesUtil().uid;
+
+    // Get other apps (excluding suggested, preferred, and last used)
+    var otherApps = enabledApps
+        .where(
+          (app) =>
+              !suggestedAppIds.contains(app.id) &&
+              (preferredApp == null || app.id != preferredApp.id) &&
+              (lastUsedApp == null || app.id != lastUsedApp.id),
+        )
+        .toList();
+
+    // Sort: user's own apps first, then alphabetically by name
+    otherApps.sort((a, b) {
+      final aIsOwned = a.isOwner(currentUserId);
+      final bIsOwned = b.isOwner(currentUserId);
+      if (aIsOwned && !bIsOwned) return -1;
+      if (!aIsOwned && bIsOwned) return 1;
+      return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+    });
+
+    return ListView(
+      children: [
+        // Suggested Apps section
+        if (suggestedApps.isNotEmpty) ...[
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+            child: Text(
+              context.l10n.suggestedTemplates,
+              style: const TextStyle(color: Colors.grey, fontSize: 14, fontWeight: FontWeight.w600),
+            ),
+          ),
+          ...suggestedApps.map((app) {
+            final isAvailable = widget.provider.isSuggestedAppAvailable(app.id);
+            final isInstalling = _AppsListState._installingApps[app.id] == true;
+            return _AppListItem(
+              app: app,
+              isSelected: app.id == widget.currentAppId,
+              onTap: () => isAvailable ? _handleAppTap(context, app) : _handleUnavailableAppTap(context, app),
+              isSuggested: true,
+              isDefault: app.id == preferredAppId && preferredAppId?.isNotEmpty == true,
+              isInstalling: isInstalling,
+              provider: widget.provider,
+            );
+          }),
+        ],
+
+        // Other Apps section (order: default app, last used, then others)
+        if (otherApps.isNotEmpty || lastUsedApp != null || preferredApp != null) ...[
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+            child: Text(
+              suggestedApps.isNotEmpty ? context.l10n.otherTemplates : context.l10n.availableTemplates,
+              style: const TextStyle(color: Colors.grey, fontSize: 14, fontWeight: FontWeight.w600),
+            ),
+          ),
+          // 1. Show default/preferred app first if available (and not in suggested)
+          if (preferredApp != null && !suggestedAppIds.contains(preferredApp.id))
+            _AppListItem(
+              app: preferredApp,
+              isSelected: preferredApp.id == widget.currentAppId,
+              onTap: () => _handleAppTap(context, preferredApp),
+              isDefault: true,
+              provider: widget.provider,
+            ),
+          // 2. Show last used app second if available (and different from preferred)
+          if (lastUsedApp != null && lastUsedApp.id != preferredAppId)
+            _AppListItem(
+              app: lastUsedApp,
+              isSelected: lastUsedApp.id == widget.currentAppId,
+              onTap: () => _handleAppTap(context, lastUsedApp),
+              isLastUsed: true,
+              isDefault: false,
+              provider: widget.provider,
+            ),
+          // 3. Then show other apps (user's own apps first, then alphabetically)
+          ...otherApps.map(
+            (app) => _AppListItem(
+              app: app,
+              isSelected: app.id == widget.currentAppId,
+              onTap: () => _handleAppTap(context, app),
+              isDefault: false,
+              provider: widget.provider,
+            ),
+          ),
+        ],
+
+        // Get Creative section
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+          child: Text(
+            context.l10n.getCreative,
+            style: const TextStyle(color: Colors.grey, fontSize: 14, fontWeight: FontWeight.w600),
+          ),
+        ),
+
+        // Create Template option
+        const _CreateTemplateListItem(),
+
+        // All Templates option
+        const _EnableAppsListItem(),
+      ],
+    );
   }
 
   void _handleAppTap(BuildContext context, App app) async {
@@ -249,7 +355,7 @@ class _AppsList extends StatelessWidget {
     final previousAppId = provider.getSummarizedApp()?.appId;
     final conversationId = provider.conversation.id;
 
-    MixpanelManager().summarizedAppSelected(
+    PlatformManager.instance.analytics.summarizedAppSelected(
       conversationId: conversationId,
       selectedAppId: app.id,
       previousAppId: previousAppId,
@@ -266,78 +372,79 @@ class _AppsList extends StatelessWidget {
 
   void _handleUnavailableAppTap(BuildContext context, App app) async {
     // Check if app is already being installed
-    if (_AppsList._installingApps[app.id] == true) {
+    if (_AppsListState._installingApps[app.id] == true) {
       return;
     }
 
     // Set installing state
-    _AppsList._installingApps[app.id] = true;
+    setState(() {
+      _AppsListState._installingApps[app.id] = true;
+    });
 
     try {
-      final appProvider = context.read<AppProvider>();
       final conversationProvider = context.read<ConversationDetailProvider>();
       final conversationId = conversationProvider.conversation.id;
 
-      // Find the app index in the apps list for toggleApp
-      final appIndex = appProvider.apps.indexWhere((a) => a.id == app.id);
+      final success = await conversationProvider.enableApp(app);
 
-      // Install/enable the app
-      await appProvider.toggleApp(app.id, true, appIndex >= 0 ? appIndex : null);
+      if (!success) {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(context.l10n.failedToInstallApp(app.name)),
+              duration: const Duration(seconds: 3),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+        return;
+      }
 
-      // Check if installation was successful
-      final installedApp = appProvider.apps.firstWhereOrNull((a) => a.id == app.id && a.enabled);
+      // Track analytics
+      PlatformManager.instance.analytics.summarizedAppSelected(
+        conversationId: conversationId,
+        selectedAppId: app.id,
+        previousAppId: conversationProvider.getSummarizedApp()?.appId,
+      );
 
-      if (installedApp != null) {
-        // Track analytics
-        MixpanelManager().summarizedAppSelected(
-          conversationId: conversationId,
-          selectedAppId: app.id,
-          previousAppId: conversationProvider.getSummarizedApp()?.appId,
-        );
+      // Track the last used app
+      conversationProvider.trackLastUsedSummarizationApp(app.id);
 
-        // Track the last used app
-        conversationProvider.trackLastUsedSummarizationApp(app.id);
+      // Close the bottom sheet
+      if (context.mounted) Navigator.pop(context);
 
-        // Close the bottom sheet
-        Navigator.pop(context);
-
-        // Set the app for reprocessing and reprocess the conversation
-        conversationProvider.setSelectedAppForReprocessing(installedApp);
-        await conversationProvider.reprocessConversation(appId: app.id);
-      } else {
-        // Installation failed
+      // Set the app for reprocessing and reprocess the conversation
+      conversationProvider.setSelectedAppForReprocessing(app);
+      await conversationProvider.reprocessConversation(appId: app.id);
+    } catch (e) {
+      // Handle installation error
+      if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Failed to install ${app.name}. Please try again.'),
+            content: Text(context.l10n.errorInstallingApp(app.name, e.toString())),
             duration: const Duration(seconds: 3),
             backgroundColor: Colors.red,
           ),
         );
       }
-    } catch (e) {
-      // Handle installation error
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Error installing ${app.name}: ${e.toString()}'),
-          duration: const Duration(seconds: 3),
-          backgroundColor: Colors.red,
-        ),
-      );
     } finally {
       // Clear installing state
-      _AppsList._installingApps[app.id] = false;
+      if (mounted) {
+        setState(() {
+          _AppsListState._installingApps[app.id] = false;
+        });
+      }
     }
   }
 }
 
-class _AppListItem extends StatelessWidget {
-  final App? app;
+class _AppListItem extends StatefulWidget {
+  final App app;
   final bool isSelected;
   final VoidCallback onTap;
-  final Widget? trailingIcon;
-  final String? subtitle;
   final bool isSuggested;
   final bool isLastUsed;
+  final bool isDefault;
   final bool isInstalling;
   final ConversationDetailProvider? provider;
 
@@ -345,152 +452,247 @@ class _AppListItem extends StatelessWidget {
     required this.app,
     required this.isSelected,
     required this.onTap,
-    this.trailingIcon,
-    this.subtitle,
     this.isSuggested = false,
     this.isLastUsed = false,
+    this.isDefault = false,
     this.isInstalling = false,
     this.provider,
   });
 
   @override
+  State<_AppListItem> createState() => _AppListItemState();
+}
+
+class _AppListItemState extends State<_AppListItem> {
+  @override
   Widget build(BuildContext context) {
-    return ListTile(
-      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
-      leading: _buildLeadingIcon(),
-      title: Row(
-        children: [
-          Expanded(
-            child: Text(
-              app != null ? app!.name.decodeString : 'Auto',
-              style: TextStyle(
-                color: Colors.white,
-                fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
-                fontSize: 16,
-              ),
-            ),
-          ),
-          if (isLastUsed)
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              decoration: BoxDecoration(
-                color: Colors.white.withValues(alpha: 0.9),
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: Colors.white.withValues(alpha: 0.3)),
-              ),
-              child: const Text(
-                'Last Used',
-                style: TextStyle(
-                  color: Colors.black,
-                  fontSize: 11,
-                  fontWeight: FontWeight.w600,
+    return Dismissible(
+      key: Key('dismissible_${widget.app.id}'),
+      direction: DismissDirection.horizontal,
+      confirmDismiss: (direction) async {
+        // Show confirmation dialog
+        final confirmed = await _showSetDefaultConfirmation(context);
+
+        if (confirmed == true) {
+          // Set as preferred app
+          if (widget.provider != null) {
+            widget.provider!.setPreferredSummarizationApp(widget.app.id);
+            if (context.mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(context.l10n.setAsDefaultSuccess(widget.app.name.decodeString)),
+                  duration: const Duration(seconds: 2),
                 ),
-              ),
+              );
+            }
+          }
+        }
+
+        // Always return false to prevent dismissal - we just want the swipe action, not removal
+        return false;
+      },
+      background: _buildSwipeBackground(isLeft: true),
+      secondaryBackground: _buildSwipeBackground(isLeft: false),
+      child: _buildListTile(),
+    );
+  }
+
+  Future<bool?> _showSetDefaultConfirmation(BuildContext context) {
+    return showCupertinoDialog<bool>(
+      context: context,
+      builder: (BuildContext dialogContext) {
+        return CupertinoAlertDialog(
+          title: Text(context.l10n.setDefaultApp),
+          content: Padding(
+            padding: const EdgeInsets.only(top: 8.0),
+            child: Text(context.l10n.setDefaultAppContent(widget.app.name.decodeString)),
+          ),
+          actions: [
+            CupertinoDialogAction(
+              isDefaultAction: true,
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: Text(context.l10n.cancel),
             ),
+            CupertinoDialogAction(
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              child: Text(context.l10n.setDefaultButton),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _buildSwipeBackground({required bool isLeft}) {
+    return Container(
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: isLeft ? Alignment.centerLeft : Alignment.centerRight,
+          end: isLeft ? Alignment.centerRight : Alignment.centerLeft,
+          colors: [Colors.deepPurple.withValues(alpha: 0.7), Colors.transparent],
+        ),
+      ),
+      alignment: isLeft ? Alignment.centerLeft : Alignment.centerRight,
+      padding: const EdgeInsets.symmetric(horizontal: 24),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.star_rounded, color: Colors.amber.shade300, size: 20),
+          const SizedBox(height: 2),
+          Text(
+            context.l10n.defaultLabel,
+            style: const TextStyle(color: Colors.white70, fontWeight: FontWeight.w600, fontSize: 11),
+          ),
         ],
       ),
-      subtitle: app != null
-          ? Text(
-              app!.description.decodeString,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(color: Colors.grey, fontSize: 12),
-            )
-          : subtitle != null
-              ? Text(
-                  subtitle!,
-                  style: const TextStyle(color: Colors.grey, fontSize: 12),
-                )
-              : null,
-      trailing: _buildTrailingWidget(),
-      selected: isSelected,
-      onTap: onTap,
+    );
+  }
+
+  Widget _buildListTile() {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        ListTile(
+          contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
+          leading: _buildLeadingIcon(),
+          title: Text(
+            widget.app.name.decodeString,
+            style: TextStyle(
+              color: Colors.white,
+              fontWeight: widget.isSelected ? FontWeight.bold : FontWeight.w500,
+              fontSize: 16,
+            ),
+          ),
+          subtitle: _buildSubtitle(),
+          trailing: _buildTrailingWidget(),
+          selected: widget.isSelected,
+          onTap: widget.onTap,
+        ),
+        Divider(height: 1, thickness: 0.5, color: Colors.grey.withValues(alpha: 0.2), indent: 56, endIndent: 16),
+      ],
+    );
+  }
+
+  Widget? _buildSubtitle() {
+    // Build tags row for apps
+    final List<Widget> tags = [];
+
+    if (widget.isDefault) {
+      tags.add(
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+          decoration: BoxDecoration(
+            color: Colors.amber.shade300.withValues(alpha: 0.15),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Center(
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(0, 1, 0, 0),
+                  child: FaIcon(FontAwesomeIcons.solidStar, size: 7, color: Colors.amber.shade300),
+                ),
+                const SizedBox(width: 4),
+                Text(
+                  context.l10n.defaultLabel,
+                  style: TextStyle(color: Colors.amber.shade300, fontSize: 9, fontWeight: FontWeight.w600),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
+    if (widget.isLastUsed && !widget.isDefault) {
+      tags.add(
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+          decoration: BoxDecoration(
+            color: Colors.grey.shade600.withValues(alpha: 0.3),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Center(
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(0, 1, 0, 0),
+                  child: FaIcon(FontAwesomeIcons.clock, size: 7, color: Colors.grey.shade400),
+                ),
+                const SizedBox(width: 4),
+                Text(
+                  context.l10n.lastUsedLabel,
+                  style: TextStyle(color: Colors.grey.shade400, fontSize: 9, fontWeight: FontWeight.w600),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
+    if (tags.isEmpty) {
+      return null;
+    }
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 4),
+      child: Row(children: tags),
     );
   }
 
   Widget _buildTrailingWidget() {
     // Check if this app is currently being processed
-    final isProcessing = provider != null &&
-        provider!.loadingReprocessConversation &&
-        ((app != null && provider!.selectedAppForReprocessing?.id == app!.id) ||
-            (app == null && provider!.selectedAppForReprocessing == null));
+    final isProcessing = widget.provider != null &&
+        widget.provider!.loadingReprocessConversation &&
+        widget.provider!.selectedAppForReprocessing?.id == widget.app.id;
 
-    if (isSelected) {
+    if (widget.isSelected) {
       return const Icon(Icons.check, color: Colors.green, size: 20);
-    } else if (isInstalling) {
+    } else if (widget.isInstalling) {
       return const SizedBox(
         width: 20,
         height: 20,
-        child: CircularProgressIndicator(
-          strokeWidth: 2,
-          valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
-        ),
+        child: CircularProgressIndicator(strokeWidth: 2, valueColor: AlwaysStoppedAnimation<Color>(Colors.white)),
       );
     } else if (isProcessing) {
       return const SizedBox(
         width: 20,
         height: 20,
-        child: CircularProgressIndicator(
-          strokeWidth: 2,
-          valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
-        ),
+        child: CircularProgressIndicator(strokeWidth: 2, valueColor: AlwaysStoppedAnimation<Color>(Colors.white)),
       );
     } else {
-      return trailingIcon ?? const SizedBox.shrink();
+      return const SizedBox.shrink();
     }
   }
 
   Widget _buildLeadingIcon() {
-    if (app != null) {
-      return CachedNetworkImage(
-        imageUrl: app!.getImageUrl(),
-        imageBuilder: (context, imageProvider) {
-          return CircleAvatar(
-            backgroundColor: Colors.white,
-            radius: 16,
-            backgroundImage: imageProvider,
-          );
-        },
-        errorWidget: (context, url, error) {
-          return const CircleAvatar(
-            backgroundColor: Colors.white,
-            radius: 16,
-            child: Icon(Icons.error_outline_rounded, size: 16),
-          );
-        },
-        progressIndicatorBuilder: (context, url, progress) => CircleAvatar(
+    return CachedNetworkImage(
+      imageUrl: widget.app.getImageUrl(),
+      imageBuilder: (context, imageProvider) {
+        return CircleAvatar(backgroundColor: Colors.white, radius: 16, backgroundImage: imageProvider);
+      },
+      errorWidget: (context, url, error) {
+        return const CircleAvatar(
           backgroundColor: Colors.white,
           radius: 16,
-          child: CircularProgressIndicator(
-            value: progress.progress,
-            valueColor: const AlwaysStoppedAnimation<Color>(Colors.white),
-            strokeWidth: 2,
-          ),
+          child: Icon(Icons.error_outline_rounded, size: 16),
+        );
+      },
+      progressIndicatorBuilder: (context, url, progress) => CircleAvatar(
+        backgroundColor: Colors.white,
+        radius: 16,
+        child: CircularProgressIndicator(
+          value: progress.progress,
+          valueColor: const AlwaysStoppedAnimation<Color>(Colors.white),
+          strokeWidth: 2,
         ),
-      );
-    } else {
-      return Container(
-        decoration: BoxDecoration(
-          image: DecorationImage(
-            image: AssetImage(Assets.images.background.path),
-            fit: BoxFit.cover,
-          ),
-          borderRadius: const BorderRadius.all(Radius.circular(16.0)),
-        ),
-        height: 32,
-        width: 32,
-        child: Stack(
-          alignment: Alignment.center,
-          children: [
-            Image.asset(
-              Assets.images.herologo.path,
-              height: 20,
-              width: 20,
-            ),
-          ],
-        ),
-      );
-    }
+      ),
+    );
   }
 }
 
@@ -499,75 +701,34 @@ class _CreateTemplateListItem extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: () async {
-        Navigator.pop(context);
-        final conversationId = context.read<ConversationDetailProvider>().conversation.id;
-        MixpanelManager().summarizedAppCreateTemplateClicked(conversationId: conversationId);
-
-        // Navigate to AddAppPage with preset values for template creation
-        await Navigator.push(
-          context,
-          MaterialPageRoute(
-            builder: (context) => const AddAppPage(presetForConversationAnalysis: true),
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        ListTile(
+          contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
+          leading: CircleAvatar(
+            backgroundColor: Colors.white,
+            radius: 16,
+            child: FaIcon(FontAwesomeIcons.plus, color: Colors.black, size: 18),
           ),
-        );
+          title: Text(
+            context.l10n.createCustomTemplate,
+            style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w500, fontSize: 16),
+          ),
+          trailing: const Icon(Icons.arrow_forward_ios, color: Colors.white, size: 16),
+          onTap: () {
+            final conversationId = context.read<ConversationDetailProvider>().conversation.id;
+            PlatformManager.instance.analytics.summarizedAppCreateTemplateClicked(conversationId: conversationId);
 
-        MixpanelManager().pageOpened('Create Template from Conversation');
-      },
-      child: Container(
-        padding: const EdgeInsets.all(20),
-        margin: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-        decoration: BoxDecoration(
-          color: Colors.white.withValues(alpha: 0.9),
-          borderRadius: BorderRadius.circular(16),
+            // Close the current bottom sheet first
+            Navigator.pop(context);
+
+            // Show the quick create template bottom sheet
+            showCreateTemplateBottomSheet(context, conversationId: conversationId);
+          },
         ),
-        child: Row(
-          children: [
-            Container(
-              padding: const EdgeInsets.all(8),
-              decoration: BoxDecoration(
-                color: const Color(0xFF1F1F25),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: const Icon(
-                Icons.auto_fix_high,
-                color: Colors.white,
-                size: 20,
-              ),
-            ),
-            const SizedBox(width: 16),
-            const Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'Create Custom Template',
-                    style: TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.w600,
-                      color: Colors.black,
-                    ),
-                  ),
-                  SizedBox(height: 2),
-                  Text(
-                    'Build a personalized analysis app for your conversations',
-                    style: TextStyle(
-                      fontSize: 13,
-                      color: Colors.black54,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const Icon(
-              Icons.chevron_right,
-              color: Colors.black,
-              size: 24,
-            ),
-          ],
-        ),
-      ),
+        Divider(height: 1, thickness: 0.5, color: Colors.grey.withValues(alpha: 0.2), indent: 56, endIndent: 16),
+      ],
     );
   }
 }
@@ -577,43 +738,42 @@ class _EnableAppsListItem extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return ListTile(
-      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
-      leading: const Icon(Icons.apps, color: Colors.white, size: 24),
-      title: const Text(
-        'Explore',
-        style: TextStyle(
-          color: Colors.white,
-          fontWeight: FontWeight.w500,
-          fontSize: 16,
-        ),
-      ),
-      trailing: const Icon(Icons.arrow_forward_ios, color: Colors.white, size: 16),
-      onTap: () {
-        Navigator.pop(context);
-        final conversationId = context.read<ConversationDetailProvider>().conversation.id;
-        MixpanelManager().summarizedAppEnableAppsClicked(conversationId: conversationId);
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        ListTile(
+          contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
+          leading: CircleAvatar(
+            backgroundColor: Colors.white,
+            radius: 16,
+            child: FaIcon(FontAwesomeIcons.solidFolderOpen, color: Colors.black, size: 14),
+          ),
+          title: Text(
+            context.l10n.allTemplates,
+            style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w500, fontSize: 16),
+          ),
+          trailing: const Icon(Icons.arrow_forward_ios, color: Colors.white, size: 16),
+          onTap: () {
+            Navigator.pop(context);
+            final conversationId = context.read<ConversationDetailProvider>().conversation.id;
+            PlatformManager.instance.analytics.summarizedAppEnableAppsClicked(conversationId: conversationId);
 
-        // Try to route to conversation-analysis category first
-        final appProvider = context.read<AppProvider>();
-        final conversationAnalysisCategory = appProvider.categories.firstWhereOrNull(
-          (category) => category.id == 'conversation-analysis',
-        );
+            // Navigate to Summary (memories) capability apps page
+            final appProvider = context.read<AppProvider>();
+            final memoriesApps = appProvider.apps.where((app) => app.worksWithMemories()).toList();
 
-        if (conversationAnalysisCategory != null) {
-          final categoryApps = appProvider.apps.where((app) => app.category == 'conversation-analysis').toList();
-          routeToPage(
+            routeToPage(
               context,
-              CategoryAppsPage(
-                category: conversationAnalysisCategory,
-                apps: categoryApps,
-              ));
-        } else {
-          // Fallback to general apps page
-          routeToPage(context, const AppsPage(showAppBar: true));
-        }
-        MixpanelManager().pageOpened('Detail Apps');
-      },
+              CapabilityAppsPage(
+                capability: AppCapability(title: context.l10n.summary, id: 'memories'),
+                apps: memoriesApps,
+              ),
+            );
+            PlatformManager.instance.analytics.pageOpened('Summary Apps');
+          },
+        ),
+        Divider(height: 1, thickness: 0.5, color: Colors.grey.withValues(alpha: 0.2), indent: 56, endIndent: 16),
+      ],
     );
   }
 }

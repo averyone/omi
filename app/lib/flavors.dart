@@ -1,5 +1,6 @@
-import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+
+import 'package:omi/utils/logger.dart';
 
 enum Environment {
   prod,
@@ -9,7 +10,7 @@ enum Environment {
     return Environment.values.firstWhere(
       (e) => e.name == appFlavor?.toLowerCase(),
       orElse: () {
-        debugPrint('Warning: Unknown flavor "$appFlavor", defaulting to dev');
+        Logger.debug('Warning: Unknown flavor "$appFlavor", defaulting to dev');
         return Environment.dev;
       },
     );
@@ -24,8 +25,6 @@ class F {
       case Environment.prod:
         return 'Omi';
       case Environment.dev:
-        return 'Omi Dev';
-      default:
         return 'Omi Dev';
     }
   }

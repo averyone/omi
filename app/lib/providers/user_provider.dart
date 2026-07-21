@@ -1,14 +1,38 @@
-import 'package:awesome_notifications/awesome_notifications.dart';
 import 'package:flutter/material.dart';
+
+import 'package:awesome_notifications/awesome_notifications.dart';
+
 import 'package:omi/backend/http/api/privacy.dart';
+import 'package:omi/backend/http/api/users.dart';
+import 'package:omi/backend/preferences.dart';
+import 'package:omi/backend/schema/geolocation.dart';
+import 'package:omi/app_globals.dart';
 import 'package:omi/services/notifications.dart';
+import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/logger.dart';
 
 class UserProvider with ChangeNotifier {
   static const int _migrationNotificationId = 1337;
 
+  /// Fetches the server's private-cloud-sync flag. Returns `null` on a failed
+  /// fetch so the loader can preserve the last known state. Injectable for tests.
+  final Future<bool?> Function() _privateCloudSyncFetcher;
+
+  /// Persists the private-cloud-sync flag. Returns `false` when the write did
+  /// not take effect (no response / non-200 / status != ok). Injectable for tests.
+  final Future<bool> Function(bool value) _privateCloudSyncSetter;
+
+  UserProvider({
+    Future<bool?> Function()? privateCloudSyncFetcher,
+    Future<bool> Function(bool value)? privateCloudSyncSetter,
+  })  : _privateCloudSyncFetcher = privateCloudSyncFetcher ?? getPrivateCloudSyncEnabled,
+        _privateCloudSyncSetter = privateCloudSyncSetter ?? setPrivateCloudSyncEnabled;
+
   String _dataProtectionLevel = 'standard';
   bool _isLoading = false;
+  bool _privateCloudSyncEnabled = false;
+  bool _trainingDataOptedIn = false;
+  String? _trainingDataStatus;
 
   bool _isMigrating = false;
   bool _migrationFailed = false;
@@ -21,8 +45,28 @@ class UserProvider with ChangeNotifier {
   String _targetLevel = '';
   DateTime? _startTime;
 
+  Geolocation? _lastKnownLocation;
+
+  // Transcription preferences
+  bool _singleLanguageMode = false;
+  List<String> _transcriptionVocabulary = [];
+
+  // Loading states for transcription settings
+  bool _isUpdatingSingleLanguageMode = false;
+  bool _isUpdatingVocabulary = false;
+  int _sessionGeneration = 0;
+
+  // Transcription preferences getters
+  bool get singleLanguageMode => _singleLanguageMode;
+  List<String> get transcriptionVocabulary => _transcriptionVocabulary;
+  bool get isUpdatingSingleLanguageMode => _isUpdatingSingleLanguageMode;
+  bool get isUpdatingVocabulary => _isUpdatingVocabulary;
+
   String get dataProtectionLevel => _dataProtectionLevel;
   bool get isLoading => _isLoading;
+  bool get privateCloudSyncEnabled => _privateCloudSyncEnabled;
+  bool get trainingDataOptedIn => _trainingDataOptedIn;
+  String? get trainingDataStatus => _trainingDataStatus;
   bool get isMigrating => _isMigrating;
   bool get migrationFailed => _migrationFailed;
   int get migrationTotalCount => _migrationQueue.length;
@@ -31,13 +75,37 @@ class UserProvider with ChangeNotifier {
   String get sourceLevel => _sourceLevel;
   String get targetLevel => _targetLevel;
 
+  void clearUserData() {
+    _sessionGeneration++;
+    _dataProtectionLevel = 'standard';
+    _isLoading = false;
+    _privateCloudSyncEnabled = false;
+    _trainingDataOptedIn = false;
+    _trainingDataStatus = null;
+    _isMigrating = false;
+    _migrationFailed = false;
+    _migrationQueue = [];
+    _processedCount = 0;
+    _migrationMessage = '';
+    _sourceLevel = '';
+    _targetLevel = '';
+    _startTime = null;
+    _lastKnownLocation = null;
+    _singleLanguageMode = false;
+    _transcriptionVocabulary = [];
+    _isUpdatingSingleLanguageMode = false;
+    _isUpdatingVocabulary = false;
+    notifyListeners();
+  }
+
   String get migrationETA {
+    final ctx = globalNavigatorKey.currentContext;
     if (_processedCount == 0 || _startTime == null || migrationTotalCount == 0) {
-      return 'Calculating...';
+      return ctx?.l10n.calculatingETA ?? 'Calculating...';
     }
     final elapsed = DateTime.now().difference(_startTime!);
     if (elapsed.inSeconds < 2) {
-      return 'Calculating...';
+      return ctx?.l10n.calculatingETA ?? 'Calculating...';
     }
     final timePerObject = elapsed.inMilliseconds / _processedCount;
     final remainingObjects = migrationTotalCount - _processedCount;
@@ -45,47 +113,271 @@ class UserProvider with ChangeNotifier {
     final remainingDuration = Duration(milliseconds: remainingMilliseconds);
 
     if (remainingDuration.inMinutes > 1) {
-      return 'About ${remainingDuration.inMinutes} minutes remaining';
+      return ctx?.l10n.aboutMinutesRemaining(remainingDuration.inMinutes) ??
+          'About ${remainingDuration.inMinutes} minutes remaining';
     } else if (remainingDuration.inSeconds > 10) {
-      return 'About a minute remaining';
+      return ctx?.l10n.aboutAMinuteRemaining ?? 'About a minute remaining';
     } else if (remainingObjects > 0) {
-      return 'Almost done...';
+      return ctx?.l10n.almostDone ?? 'Almost done...';
     }
     return '';
   }
 
   String _getMigrationItemName(String type) {
+    final ctx = globalNavigatorKey.currentContext;
     switch (type) {
       case 'conversation':
-        return 'conversations';
+        return ctx?.l10n.conversations.toLowerCase() ?? 'conversations';
       case 'memory':
-        return 'memories';
+        return ctx?.l10n.memories.toLowerCase() ?? 'memories';
       case 'chat':
-        return 'chats';
+        return ctx?.l10n.chatsLowercase ?? 'chats';
       default:
-        return 'data';
+        return ctx?.l10n.dataLowercase ?? 'data';
     }
   }
 
   Future<void> initialize() async {
+    final generation = _sessionGeneration;
     _isLoading = true;
+
+    // Preload from SharedPreferences for instant UI
+    _preloadFromCache();
     notifyListeners();
+
     try {
       final userProfile = await PrivacyApi.getUserProfile();
+      if (generation != _sessionGeneration) return;
       _dataProtectionLevel = userProfile['data_protection_level'] ?? 'standard';
+
+      // Load private cloud sync status
+      await _loadPrivateCloudSyncStatus(generation);
+      if (generation != _sessionGeneration) return;
+
+      // Load training data opt-in status
+      await _loadTrainingDataOptIn(generation);
+      if (generation != _sessionGeneration) return;
+
+      // Load transcription preferences (will sync with API and update cache)
+      await _loadTranscriptionPreferences(generation);
+      if (generation != _sessionGeneration) return;
 
       final migrationStatus = userProfile['migration_status'];
       if (migrationStatus != null && migrationStatus['status'] == 'in_progress') {
         final targetLevel = migrationStatus['target_level'];
         if (targetLevel != null) {
-          Future.microtask(() => updateDataProtectionLevel(targetLevel));
+          Future.microtask(() {
+            if (generation == _sessionGeneration) updateDataProtectionLevel(targetLevel);
+          });
         }
       }
     } catch (e, stackTrace) {
       Logger.error('Failed to initialize UserProvider: $e\n$stackTrace');
     } finally {
-      _isLoading = false;
+      if (generation == _sessionGeneration) {
+        _isLoading = false;
+        notifyListeners();
+      }
+    }
+  }
+
+  void _preloadFromCache() {
+    final prefs = SharedPreferencesUtil();
+    _singleLanguageMode = prefs.cachedSingleLanguageMode;
+    _transcriptionVocabulary = prefs.cachedTranscriptionVocabulary;
+  }
+
+  void _syncToCache() {
+    final prefs = SharedPreferencesUtil();
+    prefs.cachedSingleLanguageMode = _singleLanguageMode;
+    prefs.cachedTranscriptionVocabulary = _transcriptionVocabulary;
+  }
+
+  @visibleForTesting
+  Future<void> loadPrivateCloudSyncStatus() => _loadPrivateCloudSyncStatus(_sessionGeneration);
+
+  Future<void> _loadPrivateCloudSyncStatus(int generation) async {
+    try {
+      final enabled = await _privateCloudSyncFetcher();
+      if (generation != _sessionGeneration) return;
+      // A failed fetch returns null — keep the last known state instead of
+      // flipping the toggle off, which would misreport cloud sync as disabled
+      // (and lose recordings the user meant to keep) on a transient error.
+      if (enabled != null) {
+        _privateCloudSyncEnabled = enabled;
+      }
+    } catch (e) {
+      if (generation != _sessionGeneration) return;
+      Logger.error('Failed to load private cloud sync status: $e');
+      // Keep the cached value on error, don't reset.
+    }
+  }
+
+  Future<void> _loadTranscriptionPreferences(int generation) async {
+    try {
+      final prefs = await getTranscriptionPreferences();
+      if (generation != _sessionGeneration) return;
+      if (prefs != null) {
+        _singleLanguageMode = prefs['single_language_mode'] ?? false;
+        _transcriptionVocabulary = List<String>.from(prefs['vocabulary'] ?? []);
+        _syncToCache();
+        notifyListeners();
+      }
+    } catch (e) {
+      if (generation != _sessionGeneration) return;
+      Logger.error('Failed to load transcription preferences: $e');
+      // Keep cached values on error, don't reset
+    }
+  }
+
+  Future<void> _loadTrainingDataOptIn(int generation) async {
+    try {
+      final data = await getTrainingDataOptIn();
+      if (generation != _sessionGeneration) return;
+      _trainingDataOptedIn = data['opted_in'] ?? false;
+      _trainingDataStatus = data['status'];
+    } catch (e) {
+      if (generation != _sessionGeneration) return;
+      Logger.error('Failed to load training data opt-in status: $e');
+      _trainingDataOptedIn = false;
+      _trainingDataStatus = null;
+    }
+  }
+
+  Future<void> optInForTrainingData() async {
+    try {
+      final success = await setTrainingDataOptIn();
+      if (success) {
+        _trainingDataOptedIn = true;
+        _trainingDataStatus = 'pending_review';
+        notifyListeners();
+      }
+    } catch (e, stackTrace) {
+      Logger.error('Failed to opt-in for training data: $e\n$stackTrace');
+      rethrow;
+    }
+  }
+
+  /// Update local cached state without making an API call.
+  /// Used when the backend has already set the value (e.g., after language change).
+  void updateSingleLanguageModeLocally(bool value) {
+    _singleLanguageMode = value;
+    _syncToCache();
+    notifyListeners();
+  }
+
+  Future<bool> setSingleLanguageMode(bool value) async {
+    if (_isUpdatingSingleLanguageMode) return false;
+
+    _isUpdatingSingleLanguageMode = true;
+    notifyListeners();
+
+    try {
+      final success = await setTranscriptionPreferences(singleLanguageMode: value);
+      if (success) {
+        _singleLanguageMode = value;
+        _syncToCache();
+      }
+      return success;
+    } catch (e, stackTrace) {
+      Logger.error('Failed to set single language mode: $e\n$stackTrace');
+      return false;
+    } finally {
+      _isUpdatingSingleLanguageMode = false;
       notifyListeners();
+    }
+  }
+
+  Future<bool> updateTranscriptionVocabulary(List<String> vocabulary) async {
+    if (_isUpdatingVocabulary) return false;
+
+    _isUpdatingVocabulary = true;
+    notifyListeners();
+
+    try {
+      final success = await setTranscriptionPreferences(vocabulary: vocabulary);
+      if (success) {
+        _transcriptionVocabulary = vocabulary;
+        _syncToCache();
+      }
+      return success;
+    } catch (e, stackTrace) {
+      Logger.error('Failed to update transcription vocabulary: $e\n$stackTrace');
+      return false;
+    } finally {
+      _isUpdatingVocabulary = false;
+      notifyListeners();
+    }
+  }
+
+  Future<bool> addVocabularyWords(List<String> words) async {
+    if (words.isEmpty) return false;
+    final trimingWords = words.map((w) => w.trim()).where((w) => !_transcriptionVocabulary.contains(w));
+    if (trimingWords.isEmpty) {
+      return false;
+    }
+    final newVocabulary = [..._transcriptionVocabulary, ...trimingWords];
+    return updateTranscriptionVocabulary(newVocabulary);
+  }
+
+  Future<bool> removeVocabularyWord(String word) async {
+    final newVocabulary = _transcriptionVocabulary.where((w) => w != word).toList();
+    return updateTranscriptionVocabulary(newVocabulary);
+  }
+
+  Future<void> setPrivateCloudSync(bool value) async {
+    try {
+      final success = await _privateCloudSyncSetter(value);
+      // A rejected write (no response / non-200 / status != ok) must surface as
+      // an error, not be swallowed. Otherwise the caller shows a success message
+      // while the toggle snaps back to its old state — the user believes cloud
+      // storage is on and loses the recordings they meant to keep (#9466).
+      if (!success) {
+        throw Exception('Server rejected private cloud sync update');
+      }
+      _privateCloudSyncEnabled = value;
+      notifyListeners();
+    } catch (e, stackTrace) {
+      Logger.error('Failed to set private cloud sync: $e\n$stackTrace');
+      rethrow;
+    }
+  }
+
+  Future<void> updateUserGeolocationIfNeeded(Map<String, dynamic> data) async {
+    try {
+      final newLocation = Geolocation(
+        latitude: data['latitude'],
+        longitude: data['longitude'],
+        accuracy: data['accuracy'],
+        altitude: data['altitude'],
+        time: DateTime.parse(data['time']).toUtc(),
+      );
+
+      // Ensure new location has valid coordinates before proceeding.
+      if (newLocation.latitude == null || newLocation.longitude == null) {
+        Logger.log('Received location update with null coordinates, skipping.');
+        return;
+      }
+
+      if (_lastKnownLocation != null && _lastKnownLocation!.latitude != null && _lastKnownLocation!.longitude != null) {
+        // Truncate to 4 decimal places for comparison
+        final lastLat = double.parse(_lastKnownLocation!.latitude!.toStringAsFixed(4));
+        final lastLon = double.parse(_lastKnownLocation!.longitude!.toStringAsFixed(4));
+        final newLat = double.parse(newLocation.latitude!.toStringAsFixed(4));
+        final newLon = double.parse(newLocation.longitude!.toStringAsFixed(4));
+
+        // Only update if location has changed up to 4 decimal places
+        if (lastLat == newLat && lastLon == newLon) {
+          Logger.log('User has not moved significantly (based on 4 decimal places), skipping geolocation update.');
+          return;
+        }
+      }
+
+      Logger.log('Updating user geolocation.');
+      await updateUserGeolocation(geolocation: newLocation);
+      _lastKnownLocation = newLocation;
+    } catch (e, stackTrace) {
+      Logger.error('Failed to update user geolocation: $e\n$stackTrace');
     }
   }
 
@@ -102,12 +394,13 @@ class UserProvider with ChangeNotifier {
   Future<void> updateDataProtectionLevel(String targetLevel) async {
     if (_isMigrating) return;
 
+    final ctx = globalNavigatorKey.currentContext;
     _isMigrating = true;
     _migrationFailed = false;
     _sourceLevel = _dataProtectionLevel;
     _targetLevel = targetLevel;
     _startTime = DateTime.now();
-    _migrationMessage = 'Analyzing your data...';
+    _migrationMessage = ctx?.l10n.analyzingYourData ?? 'Analyzing your data...';
     notifyListeners();
 
     try {
@@ -115,8 +408,8 @@ class UserProvider with ChangeNotifier {
 
       NotificationService.instance.showNotification(
         id: _migrationNotificationId,
-        title: 'omi says',
-        body: 'Migrating to $targetLevel protection...',
+        title: ctx?.l10n.omiSays ?? 'omi says',
+        body: ctx?.l10n.migratingToProtection(targetLevel) ?? 'Migrating to $targetLevel protection...',
         layout: NotificationLayout.Default,
         payload: {'navigate_to': '/settings/data-privacy'},
       );
@@ -125,7 +418,7 @@ class UserProvider with ChangeNotifier {
       _processedCount = 0;
 
       if (_migrationQueue.isEmpty) {
-        _migrationMessage = 'No data to migrate. Finalizing...';
+        _migrationMessage = ctx?.l10n.noDataToMigrateFinalizing ?? 'No data to migrate. Finalizing...';
         notifyListeners();
         await _finalize(targetLevel);
         return;
@@ -141,24 +434,25 @@ class UserProvider with ChangeNotifier {
 
         _processedCount += batch.length;
         final percentage = ((_processedCount / migrationTotalCount) * 100).toInt();
-        _migrationMessage = 'Migrating $itemType... $percentage%';
+        _migrationMessage =
+            ctx?.l10n.migratingItemsProgress(itemType, percentage) ?? 'Migrating $itemType... $percentage%';
 
         notifyListeners();
       }
 
-      _migrationMessage = 'All objects migrated. Finalizing...';
+      _migrationMessage = ctx?.l10n.allObjectsMigratedFinalizing ?? 'All objects migrated. Finalizing...';
       notifyListeners();
       await _finalize(targetLevel);
     } catch (e, stackTrace) {
       Logger.error('Failed to update data protection level: $e\n$stackTrace');
       _isMigrating = false;
       _migrationFailed = true;
-      _migrationMessage = 'An error occurred during migration. Please try again.';
+      _migrationMessage = ctx?.l10n.migrationErrorOccurred ?? 'An error occurred during migration. Please try again.';
 
       NotificationService.instance.showNotification(
         id: _migrationNotificationId,
-        title: 'omi says',
-        body: 'An error occurred during data migration. Please try again.',
+        title: ctx?.l10n.omiSays ?? 'omi says',
+        body: ctx?.l10n.migrationErrorOccurred ?? 'An error occurred during data migration. Please try again.',
         layout: NotificationLayout.Default,
         payload: {'navigate_to': '/settings/data-privacy'},
       );
@@ -169,19 +463,21 @@ class UserProvider with ChangeNotifier {
   }
 
   Future<void> _finalize(String targetLevel) async {
+    final ctx = globalNavigatorKey.currentContext;
     await PrivacyApi.finalizeMigration(targetLevel);
     _dataProtectionLevel = targetLevel;
     _isMigrating = false;
     _migrationFailed = false;
-    _migrationMessage = 'Migration complete!';
+    _migrationMessage = ctx?.l10n.migrationComplete ?? 'Migration complete!';
     _startTime = null;
     _processedCount = 0;
     _migrationQueue = [];
 
     NotificationService.instance.showNotification(
       id: _migrationNotificationId,
-      title: 'omi says',
-      body: 'Your data is now protected with the new $targetLevel settings.',
+      title: ctx?.l10n.omiSays ?? 'omi says',
+      body: ctx?.l10n.dataProtectedWithSettings(targetLevel) ??
+          'Your data is now protected with the new $targetLevel settings.',
       layout: NotificationLayout.Default,
       payload: {'navigate_to': '/settings/data-privacy'},
     );

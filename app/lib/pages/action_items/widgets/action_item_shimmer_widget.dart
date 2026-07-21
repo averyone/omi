@@ -1,21 +1,19 @@
 import 'package:flutter/material.dart';
-import 'package:shimmer/shimmer.dart';
+
+import 'package:omi/widgets/shimmer_with_timeout.dart';
 
 class ActionItemShimmerWidget extends StatelessWidget {
   const ActionItemShimmerWidget({super.key});
 
   @override
   Widget build(BuildContext context) {
-    return Shimmer.fromColors(
+    return ShimmerWithTimeout(
       baseColor: Colors.grey[800]!,
       highlightColor: Colors.grey[600]!,
       child: Container(
         height: 60,
         width: double.infinity,
-        decoration: BoxDecoration(
-          color: Colors.grey[800],
-          borderRadius: BorderRadius.circular(16),
-        ),
+        decoration: BoxDecoration(color: Colors.grey[800], borderRadius: BorderRadius.circular(16)),
       ),
     );
   }
@@ -24,23 +22,17 @@ class ActionItemShimmerWidget extends StatelessWidget {
 class ActionItemsShimmerList extends StatelessWidget {
   final int itemCount;
 
-  const ActionItemsShimmerList({
-    super.key,
-    this.itemCount = 8,
-  });
+  const ActionItemsShimmerList({super.key, this.itemCount = 8});
 
   @override
   Widget build(BuildContext context) {
     return SliverList(
-      delegate: SliverChildBuilderDelegate(
-        (context, index) {
-          return const Padding(
-            padding: EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-            child: ActionItemShimmerWidget(),
-          );
-        },
-        childCount: itemCount,
-      ),
+      delegate: SliverChildBuilderDelegate((context, index) {
+        return const Padding(
+          padding: EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+          child: ActionItemShimmerWidget(),
+        );
+      }, childCount: itemCount),
     );
   }
 }

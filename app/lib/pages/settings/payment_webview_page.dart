@@ -1,11 +1,18 @@
 import 'package:flutter/material.dart';
-import 'package:omi/env/env.dart';
+import 'package:provider/provider.dart';
+
 import 'package:webview_flutter/webview_flutter.dart';
+
+import 'package:omi/env/env.dart';
+import 'package:omi/providers/usage_provider.dart';
+import 'package:omi/utils/l10n_extensions.dart';
+import 'package:omi/utils/logger.dart';
 
 class PaymentWebViewPage extends StatefulWidget {
   final String checkoutUrl;
+  final String? title;
 
-  const PaymentWebViewPage({super.key, required this.checkoutUrl});
+  const PaymentWebViewPage({super.key, required this.checkoutUrl, this.title});
 
   @override
   State<PaymentWebViewPage> createState() => _PaymentWebViewPageState();
@@ -40,12 +47,12 @@ class _PaymentWebViewPageState extends State<PaymentWebViewPage> {
           },
           onNavigationRequest: (NavigationRequest request) {
             if (request.url.startsWith(successUrl)) {
-              debugPrint('Payment successful, closing webview');
+              Logger.debug('Payment successful, closing webview');
               Navigator.of(context).pop(true); // Pop with success result
               return NavigationDecision.prevent;
             }
             if (request.url.startsWith(cancelUrl)) {
-              debugPrint('Payment cancelled, closing webview');
+              Logger.debug('Payment cancelled, closing webview');
               Navigator.of(context).pop(false); // Pop with cancel result
               return NavigationDecision.prevent;
             }
@@ -58,24 +65,27 @@ class _PaymentWebViewPageState extends State<PaymentWebViewPage> {
 
   @override
   Widget build(BuildContext context) {
+    // Pop on build if the server-driven visibility flag is off, in case any
+    // caller reached here through a stale route.
+    if (!context.watch<UsageProvider>().showSubscriptionUI) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (Navigator.of(context).canPop()) Navigator.of(context).pop(false);
+      });
+      return const SizedBox.shrink();
+    }
+
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: AppBar(
-        title: const Text('Complete Your Upgrade'),
+        title: Text(widget.title ?? context.l10n.completeYourUpgrade),
         backgroundColor: Colors.black,
         elevation: 0,
-        leading: IconButton(
-          icon: const Icon(Icons.close),
-          onPressed: () => Navigator.of(context).pop(false),
-        ),
+        leading: IconButton(icon: const Icon(Icons.close), onPressed: () => Navigator.of(context).pop(false)),
       ),
       body: Stack(
         children: [
           WebViewWidget(controller: _controller),
-          if (_isLoading)
-            const Center(
-              child: CircularProgressIndicator(color: Colors.deepPurple),
-            ),
+          if (_isLoading) const Center(child: CircularProgressIndicator(color: Colors.deepPurple)),
         ],
       ),
     );

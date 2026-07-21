@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
+
 import 'package:omi/backend/http/api/conversations.dart';
 import 'package:omi/backend/schema/conversation.dart';
+import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/widgets/transcript.dart';
 
 class CompareTranscriptsPage extends StatefulWidget {
@@ -13,7 +15,6 @@ class CompareTranscriptsPage extends StatefulWidget {
 }
 
 class _CompareTranscriptsPageState extends State<CompareTranscriptsPage> {
-  int _selectedTab = 0;
   TranscriptsResponse? transcripts;
 
   @override
@@ -31,7 +32,7 @@ class _CompareTranscriptsPageState extends State<CompareTranscriptsPage> {
     return Scaffold(
       backgroundColor: Theme.of(context).colorScheme.primary,
       appBar: AppBar(
-        title: const Text('Compare Transcripts'),
+        title: Text(context.l10n.compareTranscripts),
         backgroundColor: Theme.of(context).colorScheme.primary,
       ),
       body: DefaultTabController(
@@ -40,13 +41,9 @@ class _CompareTranscriptsPageState extends State<CompareTranscriptsPage> {
         child: Column(
           children: [
             TabBar(
+              key: const ValueKey('compare_transcripts_tab_bar'),
               indicatorSize: TabBarIndicatorSize.label,
               isScrollable: false,
-              onTap: (value) {
-                setState(() {
-                  _selectedTab = value;
-                });
-              },
               padding: EdgeInsets.zero,
               indicatorPadding: EdgeInsets.zero,
               labelStyle: Theme.of(context).textTheme.titleLarge!.copyWith(fontSize: 18),
@@ -61,96 +58,98 @@ class _CompareTranscriptsPageState extends State<CompareTranscriptsPage> {
             Expanded(
               child: Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 16),
-                child: Builder(builder: (context) {
-                  return TabBarView(
-                    physics: const NeverScrollableScrollPhysics(),
-                    children: [
-                      ListView(
-                        shrinkWrap: true,
-                        children: [
-                          TranscriptWidget(
-                            segments: transcripts?.deepgram ?? [],
-                            horizontalMargin: false,
-                            topMargin: false,
-                            canDisplaySeconds: true,
-                            isConversationDetail: true,
-                          )
-                        ],
-                      ),
-                      ListView(
-                        shrinkWrap: true,
-                        children: [
-                          TranscriptWidget(
-                            segments: transcripts?.soniox ?? [],
-                            horizontalMargin: false,
-                            topMargin: false,
-                            canDisplaySeconds: true,
-                            isConversationDetail: true,
-                          )
-                        ],
-                      ),
-                      ListView(
-                        shrinkWrap: true,
-                        children: [
-                          TranscriptWidget(
-                            segments: transcripts?.speechmatics ?? [],
-                            horizontalMargin: false,
-                            topMargin: false,
-                            canDisplaySeconds: true,
-                            isConversationDetail: true,
-                          )
-                        ],
-                      ),
-                      ListView(
-                        shrinkWrap: true,
-                        children: [
-                          const SizedBox(height: 16),
-                          // Padding(
-                          //   padding: const EdgeInsets.symmetric(horizontal: 4),
-                          //   child: Row(
-                          //     mainAxisAlignment: MainAxisAlignment.start,
-                          //     crossAxisAlignment: CrossAxisAlignment.end,
-                          //     children: [
-                          //       Text(
-                          //         'Status',
-                          //         style: Theme.of(context)
-                          //             .textTheme
-                          //             .titleLarge!
-                          //             .copyWith(fontSize: 18, fontWeight: FontWeight.bold),
-                          //       ),
-                          //       const SizedBox(width: 24),
-                          //       Text(
-                          //         widget.memory.postprocessing?.status.toString().split('.')[1].toUpperCase() ??
-                          //             'UNKNOWN',
-                          //         style: const TextStyle(fontSize: 16, decoration: TextDecoration.underline),
-                          //       ),
-                          //     ],
-                          //   ),
-                          // ),
-                          // widget.memory.postprocessing?.failReason != null
-                          //     ? const SizedBox(height: 8)
-                          //     : const SizedBox(height: 0),
-                          // widget.memory.postprocessing?.failReason != null
-                          //     ? Padding(
-                          //         padding: const EdgeInsets.symmetric(horizontal: 4),
-                          //         child: Text(widget.memory.postprocessing?.failReason ?? ''),
-                          //       )
-                          //     : const SizedBox(height: 0),
-                          // widget.memory.postprocessing?.failReason != null
-                          //     ? const SizedBox(height: 16)
-                          //     : const SizedBox(height: 0),
-                          TranscriptWidget(
-                            segments: transcripts?.whisperx ?? [],
-                            horizontalMargin: false,
-                            topMargin: false,
-                            canDisplaySeconds: true,
-                            isConversationDetail: true,
-                          )
-                        ],
-                      )
-                    ],
-                  );
-                }),
+                child: Builder(
+                  builder: (context) {
+                    return TabBarView(
+                      physics: const NeverScrollableScrollPhysics(),
+                      children: [
+                        ListView(
+                          shrinkWrap: true,
+                          children: [
+                            TranscriptWidget(
+                              segments: transcripts?.deepgram ?? [],
+                              horizontalMargin: false,
+                              topMargin: false,
+                              canDisplaySeconds: true,
+                              isConversationDetail: true,
+                            ),
+                          ],
+                        ),
+                        ListView(
+                          shrinkWrap: true,
+                          children: [
+                            TranscriptWidget(
+                              segments: transcripts?.soniox ?? [],
+                              horizontalMargin: false,
+                              topMargin: false,
+                              canDisplaySeconds: true,
+                              isConversationDetail: true,
+                            ),
+                          ],
+                        ),
+                        ListView(
+                          shrinkWrap: true,
+                          children: [
+                            TranscriptWidget(
+                              segments: transcripts?.speechmatics ?? [],
+                              horizontalMargin: false,
+                              topMargin: false,
+                              canDisplaySeconds: true,
+                              isConversationDetail: true,
+                            ),
+                          ],
+                        ),
+                        ListView(
+                          shrinkWrap: true,
+                          children: [
+                            const SizedBox(height: 16),
+                            // Padding(
+                            //   padding: const EdgeInsets.symmetric(horizontal: 4),
+                            //   child: Row(
+                            //     mainAxisAlignment: MainAxisAlignment.start,
+                            //     crossAxisAlignment: CrossAxisAlignment.end,
+                            //     children: [
+                            //       Text(
+                            //         'Status',
+                            //         style: Theme.of(context)
+                            //             .textTheme
+                            //             .titleLarge!
+                            //             .copyWith(fontSize: 18, fontWeight: FontWeight.bold),
+                            //       ),
+                            //       const SizedBox(width: 24),
+                            //       Text(
+                            //         widget.memory.postprocessing?.status.toString().split('.')[1].toUpperCase() ??
+                            //             'UNKNOWN',
+                            //         style: const TextStyle(fontSize: 16, decoration: TextDecoration.underline),
+                            //       ),
+                            //     ],
+                            //   ),
+                            // ),
+                            // widget.memory.postprocessing?.failReason != null
+                            //     ? const SizedBox(height: 8)
+                            //     : const SizedBox(height: 0),
+                            // widget.memory.postprocessing?.failReason != null
+                            //     ? Padding(
+                            //         padding: const EdgeInsets.symmetric(horizontal: 4),
+                            //         child: Text(widget.memory.postprocessing?.failReason ?? ''),
+                            //       )
+                            //     : const SizedBox(height: 0),
+                            // widget.memory.postprocessing?.failReason != null
+                            //     ? const SizedBox(height: 16)
+                            //     : const SizedBox(height: 0),
+                            TranscriptWidget(
+                              segments: transcripts?.whisperx ?? [],
+                              horizontalMargin: false,
+                              topMargin: false,
+                              canDisplaySeconds: true,
+                              isConversationDetail: true,
+                            ),
+                          ],
+                        ),
+                      ],
+                    );
+                  },
+                ),
               ),
             ),
           ],

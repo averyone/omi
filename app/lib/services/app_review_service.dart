@@ -1,20 +1,21 @@
 import 'dart:io';
+
+import 'package:omi/utils/platform/platform_manager.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
-import 'package:in_app_review/in_app_review.dart';
-import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
+
+import 'package:omi/utils/logger.dart';
 
 class AppReviewService {
   static final AppReviewService _instance = AppReviewService._internal();
   factory AppReviewService() => _instance;
   AppReviewService._internal();
 
-  final InAppReview _inAppReview = InAppReview.instance;
-
-  static const String _appStoreId = '6651027111';
+  static final Uri _appStoreReviewUrl = Uri.parse('https://apps.apple.com/app/id6502156163?action=write-review');
   static final Uri _playStoreUrl = Uri.parse('https://play.google.com/store/apps/details?id=com.friend.ios');
   static const String _hasCompletedFirstActionItemKey = 'has_completed_first_action_item';
   static const String _hasShownReviewPromptKey = 'has_shown_review_prompt';
@@ -106,7 +107,9 @@ class AppReviewService {
 
     if (shouldShow) {
       await markReviewPromptShown();
-      _showReviewDialog(context);
+      if (context.mounted) {
+        _showReviewDialog(context);
+      }
       return true;
     }
     return false;
@@ -136,22 +139,13 @@ class AppReviewService {
               children: [
                 const Text(
                   'Loving Omi?',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 24,
-                    fontWeight: FontWeight.bold,
-                    height: 1.2,
-                  ),
+                  style: TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.bold, height: 1.2),
                   textAlign: TextAlign.center,
                 ),
                 const SizedBox(height: 16),
                 Text(
                   'Help us reach more people by leaving a review in the ${Platform.isIOS ? 'App Store' : 'Google Play Store'}. Your feedback means the world to us!',
-                  style: const TextStyle(
-                    color: Colors.grey,
-                    fontSize: 16,
-                    height: 1.4,
-                  ),
+                  style: const TextStyle(color: Colors.grey, fontSize: 16, height: 1.4),
                   textAlign: TextAlign.center,
                 ),
                 const SizedBox(height: 32),
@@ -162,49 +156,30 @@ class AppReviewService {
                         HapticFeedback.mediumImpact();
                         Navigator.of(context).pop();
 
-                        try {
-                          if (Platform.isIOS) {
-                            // Use in-app review for iOS
-                            if (await _inAppReview.isAvailable()) {
-                              await _inAppReview.requestReview();
-                              MixpanelManager().track('App Review Requested');
-                            } else {
-                              await _inAppReview.openStoreListing(appStoreId: _appStoreId);
-                              MixpanelManager().track('App Store Opened');
-                            }
-                          } else {
-                            // Open Play Store
-                            if (await canLaunchUrl(_playStoreUrl)) {
-                              await launchUrl(_playStoreUrl, mode: LaunchMode.externalApplication);
-                              MixpanelManager().track('Play Store Opened');
-                            }
-                          }
-                        } catch (e) {
-                          debugPrint('Error requesting review: $e');
+                        final Uri reviewUrl = Platform.isIOS ? _appStoreReviewUrl : _playStoreUrl;
+
+                        if (await canLaunchUrl(reviewUrl)) {
+                          await launchUrl(reviewUrl, mode: LaunchMode.externalApplication);
+                          PlatformManager.instance.analytics.track('App Review Opened');
+                          await Future.delayed(const Duration(milliseconds: 500));
+                        } else {
+                          Logger.debug('Could not launch review URL');
                         }
                       },
                       style: ElevatedButton.styleFrom(
                         backgroundColor: Colors.deepPurple,
                         foregroundColor: Colors.white,
                         minimumSize: const Size(double.infinity, 48),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(20),
-                        ),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
                       ),
                       child: Row(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
-                          FaIcon(
-                            Platform.isIOS ? FontAwesomeIcons.appStoreIos : FontAwesomeIcons.googlePlay,
-                            size: 20,
-                          ),
+                          FaIcon(Platform.isIOS ? FontAwesomeIcons.appStoreIos : FontAwesomeIcons.googlePlay, size: 20),
                           const SizedBox(width: 12),
                           Text(
                             'Rate on ${Platform.isIOS ? 'App Store' : 'Google Play'}',
-                            style: const TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.w600,
-                            ),
+                            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
                           ),
                         ],
                       ),
@@ -213,16 +188,10 @@ class AppReviewService {
                     TextButton(
                       onPressed: () {
                         HapticFeedback.lightImpact();
-                        MixpanelManager().track('App Review Skipped');
+                        PlatformManager.instance.analytics.track('App Review Skipped');
                         Navigator.of(context).pop();
                       },
-                      child: const Text(
-                        'Maybe later',
-                        style: TextStyle(
-                          color: Colors.grey,
-                          fontSize: 16,
-                        ),
-                      ),
+                      child: const Text('Maybe later', style: TextStyle(color: Colors.grey, fontSize: 16)),
                     ),
                   ],
                 ),

@@ -1,6 +1,7 @@
+import 'package:just_audio/just_audio.dart';
+
 import 'package:omi/backend/http/api/speech_profile.dart';
 import 'package:omi/providers/base_provider.dart';
-import 'package:just_audio/just_audio.dart';
 
 class UserSpeechSamplesProvider extends BaseProvider {
   List<String> samplesUrl = [];
@@ -70,12 +71,17 @@ class UserSpeechSamplesProvider extends BaseProvider {
         isPlaying = true;
       }
     } else {
-      _audioPlayer.stop();
-      await _audioPlayer.setUrl(samplesUrl[index]);
-      currentPlayingIndex = index;
-      isPlaying = true;
-      notifyListeners();
-      await _audioPlayer.play();
+      try {
+        await _audioPlayer.stop();
+        await _audioPlayer.setUrl(samplesUrl[index]);
+        currentPlayingIndex = index;
+        isPlaying = true;
+        notifyListeners();
+        await _audioPlayer.play();
+      } catch (e) {
+        currentPlayingIndex = null;
+        isPlaying = false;
+      }
     }
     notifyListeners();
   }

@@ -1,20 +1,25 @@
 import 'dart:io';
 
-import 'package:cached_network_image/cached_network_image.dart';
-import 'package:collection/collection.dart';
-import 'package:file_picker/file_picker.dart';
-import 'package:flutter/foundation.dart' hide Category;
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart' hide Category;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
+
+import 'package:cached_network_image/cached_network_image.dart';
+import 'package:collection/collection.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:image_picker/image_picker.dart';
+
 import 'package:omi/backend/http/api/apps.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/app.dart';
 import 'package:omi/providers/app_provider.dart';
+import 'package:omi/app_globals.dart';
 import 'package:omi/utils/alerts/app_snackbar.dart';
+import 'package:omi/utils/l10n_extensions.dart';
+import 'package:omi/utils/logger.dart';
 import 'package:omi/widgets/extensions/string.dart';
-import 'package:image_picker/image_picker.dart';
 
 class AddAppProvider extends ChangeNotifier {
   AppProvider? appProvider;
@@ -33,13 +38,15 @@ class AddAppProvider extends ChangeNotifier {
   String? appCategory;
   List<Map<String, dynamic>> actions = [];
 
-// Trigger Event
+  // Trigger Event
   String? triggerEvent;
   TextEditingController webhookUrlController = TextEditingController();
   TextEditingController setupCompletedController = TextEditingController();
   TextEditingController instructionsController = TextEditingController();
   TextEditingController authUrlController = TextEditingController();
   TextEditingController appHomeUrlController = TextEditingController();
+  TextEditingController chatToolsManifestUrlController = TextEditingController();
+  TextEditingController sourceCodeUrlController = TextEditingController();
 
   // Pricing
   TextEditingController priceController = TextEditingController();
@@ -69,7 +76,12 @@ class AddAppProvider extends ChangeNotifier {
   bool isUpdating = false;
   bool isSubmitting = false;
   bool isValid = false;
+  bool hasChanges = false;
   bool isGenratingDescription = false;
+
+  // Snapshot of the app being edited, used to detect whether the update form is dirty.
+  App? _originalApp;
+  bool _changeListenersAttached = false;
 
   bool allowPaidApps = false;
 
@@ -81,7 +93,7 @@ class AddAppProvider extends ChangeNotifier {
     appProvider = provider;
   }
 
-  Future init({bool presetForConversationAnalysis = false}) async {
+  Future init({bool presetForConversationAnalysis = false, bool presetExternalIntegration = false}) async {
     setIsLoading(true);
     if (categories.isEmpty) {
       await getCategories();
@@ -99,9 +111,7 @@ class AddAppProvider extends ChangeNotifier {
       setAppCategory('conversation-analysis');
 
       // Add memories capability
-      final memoriesCapability = capabilities.firstWhereOrNull(
-        (cap) => cap.id == 'memories',
-      );
+      final memoriesCapability = capabilities.firstWhereOrNull((cap) => cap.id == 'memories');
       if (memoriesCapability != null && !selectedCapabilities.contains(memoriesCapability)) {
         selectedCapabilities.add(memoriesCapability);
       }
@@ -110,6 +120,15 @@ class AddAppProvider extends ChangeNotifier {
       appNameController.text = 'My Conversation Analyzer';
       appDescriptionController.text = 'A custom app to analyze and summarize conversations based on my specific needs.';
 
+      checkValidity();
+    }
+
+    // Preset external integration capability
+    if (presetExternalIntegration) {
+      final externalIntegrationCapability = capabilities.firstWhereOrNull((cap) => cap.id == 'external_integration');
+      if (externalIntegrationCapability != null && !selectedCapabilities.contains(externalIntegrationCapability)) {
+        selectedCapabilities.add(externalIntegrationCapability);
+      }
       checkValidity();
     }
 
@@ -127,6 +146,7 @@ class AddAppProvider extends ChangeNotifier {
       selectePaymentPlan = null;
     }
     isPaid = paid;
+    checkValidity();
     notifyListeners();
   }
 
@@ -142,6 +162,10 @@ class AddAppProvider extends ChangeNotifier {
 
   Future prepareUpdate(App app) async {
     setIsLoading(true);
+    // Reset all form state first. The provider is reused across the add/update flows,
+    // and prepareUpdate only seeds optional fields (integration, scopes, prompts) when
+    // present on the app — without this, leftover values would read as false "changes".
+    clear();
     if (capabilities.isEmpty) {
       await getAppCapabilities();
     }
@@ -168,6 +192,7 @@ class AddAppProvider extends ChangeNotifier {
       setupCompletedController.text = app.externalIntegration!.setupCompletedUrl ?? '';
       instructionsController.text = app.externalIntegration!.setupInstructionsFilePath ?? '';
       appHomeUrlController.text = app.externalIntegration!.appHomeUrl ?? '';
+      chatToolsManifestUrlController.text = app.externalIntegration!.chatToolsManifestUrl ?? '';
       if (app.externalIntegration!.authSteps.isNotEmpty) {
         authUrlController.text = app.externalIntegration!.authSteps.first.url;
       }
@@ -176,11 +201,12 @@ class AddAppProvider extends ChangeNotifier {
       actions = [];
       if (app.externalIntegration!.actions != null) {
         for (var action in app.externalIntegration!.actions!) {
-          actions.add({
-            'action': action.action,
-          });
+          actions.add({'action': action.action});
         }
       }
+    }
+    if (app.sourceCodeUrl != null) {
+      sourceCodeUrlController.text = app.sourceCodeUrl!;
     }
     if (app.chatPrompt != null) {
       chatPromptController.text = app.chatPrompt!.decodeString;
@@ -190,13 +216,21 @@ class AddAppProvider extends ChangeNotifier {
     }
     if (app.proactiveNotification != null) {
       selectedScopes = app.getNotificationScopesFromIds(
-          capabilities.firstWhere((element) => element.id == 'proactive_notification').notificationScopes);
+        capabilities.firstWhere((element) => element.id == 'proactive_notification').notificationScopes,
+      );
     }
 
-    // Set existing thumbnails
-    thumbnailUrls = app.thumbnailUrls;
-    thumbnailIds = app.thumbnailIds;
+    // Set existing thumbnails. Copy the lists — assigning app's lists directly would
+    // alias them, so in-place add/remove would also mutate the _originalApp snapshot
+    // and the dirty check would never detect thumbnail changes.
+    thumbnailUrls = List.of(app.thumbnailUrls);
+    thumbnailIds = List.of(app.thumbnailIds);
+
+    _originalApp = app;
     isValid = false;
+    hasChanges = false;
+    // Attach after initial values are set so seeding the form doesn't mark it dirty.
+    _ensureChangeListeners();
     setIsLoading(false);
     notifyListeners();
   }
@@ -214,6 +248,8 @@ class AddAppProvider extends ChangeNotifier {
     instructionsController.clear();
     authUrlController.clear();
     appHomeUrlController.clear();
+    chatToolsManifestUrlController.clear();
+    sourceCodeUrlController.clear();
     priceController.clear();
     selectePaymentPlan = null;
     termsAgreed = false;
@@ -227,14 +263,36 @@ class AddAppProvider extends ChangeNotifier {
     thumbnailUrls = [];
     thumbnailIds = [];
     actions.clear();
+    _originalApp = null;
+    hasChanges = false;
+  }
+
+  // Re-run validity/dirty checks as the user types in any text field. Idempotent.
+  void _ensureChangeListeners() {
+    if (_changeListenersAttached) return;
+    _changeListenersAttached = true;
+    for (final controller in [
+      appNameController,
+      appDescriptionController,
+      chatPromptController,
+      conversationPromptController,
+      webhookUrlController,
+      setupCompletedController,
+      instructionsController,
+      authUrlController,
+      appHomeUrlController,
+      chatToolsManifestUrlController,
+      sourceCodeUrlController,
+      priceController,
+    ]) {
+      controller.addListener(checkValidity);
+    }
   }
 
   void addSpecificAction(String actionTypeId) {
     // Check if this action type already exists
     if (!actions.any((action) => action['action'] == actionTypeId)) {
-      actions.add({
-        'action': actionTypeId,
-      });
+      actions.add({'action': actionTypeId});
       checkValidity();
       notifyListeners();
     }
@@ -273,6 +331,7 @@ class AddAppProvider extends ChangeNotifier {
       return;
     }
     selectePaymentPlan = plan;
+    checkValidity();
     notifyListeners();
   }
 
@@ -320,54 +379,67 @@ class AddAppProvider extends ChangeNotifier {
   }
 
   bool hasDataChanged(App app, String category) {
-    if (imageFile != null) {
-      return true;
+    // A newly picked logo always counts as a change.
+    if (imageFile != null) return true;
+
+    // Metadata. app.* strings are stored encoded; compare against the decoded form
+    // since that's what the controllers hold.
+    if (appNameController.text != app.name.decodeString) return true;
+    if (appDescriptionController.text != app.description.decodeString) return true;
+    if (makeAppPublic != !app.private) return true;
+    if (appCategory != category) return true;
+
+    // Capabilities — app.capabilities is a Set<String> of ids; selectedCapabilities
+    // are AppCapability objects. Compare by id, order-insensitive.
+    if (!setEquals(selectedCapabilities.map((c) => c.id).toSet(), app.capabilities.toSet())) return true;
+
+    // Pricing — only compare price/plan when the app is (still) paid, otherwise an
+    // empty price field on a free app would read as a false change.
+    if (isPaid != app.isPaid) return true;
+    if (isPaid) {
+      if (selectePaymentPlan != app.paymentPlan) return true;
+      if ((double.tryParse(priceController.text) ?? 0.0) != (app.price ?? 0.0)) return true;
     }
-    if (appNameController.text != app.name) {
-      return true;
-    }
-    if (appDescriptionController.text != app.description) {
-      return true;
-    }
-    if (makeAppPublic != !app.private) {
-      return true;
-    }
-    if (appCategory != category) {
-      return true;
-    }
-    if (selectedCapabilities.length != app.capabilities.length) {
-      return true;
-    }
-    if (app.externalIntegration != null) {
-      if (triggerEvent != app.externalIntegration!.triggersOn) {
-        return true;
-      }
-      if (webhookUrlController.text != app.externalIntegration!.webhookUrl) {
-        return true;
-      }
-      if (setupCompletedController.text != app.externalIntegration!.setupCompletedUrl) {
-        return true;
-      }
-      if (instructionsController.text != app.externalIntegration!.setupInstructionsFilePath) {
-        return true;
-      }
-    }
-    if (chatPromptController.text != app.chatPrompt) {
-      return true;
-    }
-    if (conversationPromptController.text != app.conversationPrompt) {
-      return true;
-    }
+
+    // Prompts.
+    if (conversationPromptController.text != (app.conversationPrompt ?? '').decodeString) return true;
+    if (chatPromptController.text != (app.chatPrompt ?? '').decodeString) return true;
+
+    // Source code URL.
+    if (sourceCodeUrlController.text != (app.sourceCodeUrl ?? '')) return true;
+
+    // External integration. Compare null-safe (not gated on ext != null) so adding
+    // these fields to an app that previously had no integration is also detected.
+    final ext = app.externalIntegration;
+    if (triggerEvent != ext?.triggersOn) return true;
+    if (webhookUrlController.text != (ext?.webhookUrl ?? '')) return true;
+    if (setupCompletedController.text != (ext?.setupCompletedUrl ?? '')) return true;
+    if (instructionsController.text != (ext?.setupInstructionsFilePath ?? '')) return true;
+    if (appHomeUrlController.text != (ext?.appHomeUrl ?? '')) return true;
+    if (chatToolsManifestUrlController.text != (ext?.chatToolsManifestUrl ?? '')) return true;
+    final originalAuthUrl = (ext?.authSteps.isNotEmpty ?? false) ? ext!.authSteps.first.url : '';
+    if (authUrlController.text != originalAuthUrl) return true;
+    final originalActions = (ext?.actions ?? []).map((a) => a.action).toSet();
+    if (!setEquals(actions.map((a) => a['action'] as String).toSet(), originalActions)) return true;
+
+    // Proactive notification scopes (null-safe for the same reason as above).
+    final originalScopes = (app.proactiveNotification?.scopes ?? const <String>[]).toSet();
+    if (!setEquals(selectedScopes.map((s) => s.id).toSet(), originalScopes)) return true;
+
+    // Thumbnails (order-insensitive).
+    if (!setEquals(thumbnailIds.toSet(), app.thumbnailIds.toSet())) return true;
+
     return false;
   }
 
   void checkValidity() {
     isValid = isFormValid();
+    hasChanges = _originalApp != null && hasDataChanged(_originalApp!, _originalApp!.category);
     notifyListeners();
   }
 
   bool isFormValid() {
-    if (capabilitySelected() && (imageFile != null || imageUrl != null) && appCategory != null && termsAgreed) {
+    if (capabilitySelected() && (imageFile != null || imageUrl != null) && appCategory != null) {
       if (metadataKey.currentState != null && metadataKey.currentState!.validate()) {
         bool isValid = false;
         for (var capability in selectedCapabilities) {
@@ -430,58 +502,62 @@ class AddAppProvider extends ChangeNotifier {
       }
       if (selectedCapabilities.length == 1 && selectedCapabilities.first.id == 'proactive_notification') {
         if (selectedScopes.isEmpty) {
-          AppSnackbar.showSnackbarError('Please select one more core capability for your app to proceed');
+          AppSnackbar.showSnackbarError(globalNavigatorKey.currentContext!.l10n.addAppSelectCoreCapability);
           return false;
         }
       }
       if (isPaid && (priceController.text.isEmpty || selectePaymentPlan == null)) {
-        AppSnackbar.showSnackbarError('Please select a payment plan and enter a price for your app');
-        return false;
-      }
-      if (!termsAgreed) {
-        AppSnackbar.showSnackbarError('Please agree to the terms and conditions to proceed');
+        AppSnackbar.showSnackbarError(globalNavigatorKey.currentContext!.l10n.addAppSelectPaymentPlan);
         return false;
       }
       if (!capabilitySelected()) {
-        AppSnackbar.showSnackbarError('Please select at least one capability for your app');
+        AppSnackbar.showSnackbarError(globalNavigatorKey.currentContext!.l10n.addAppSelectCapability);
         return false;
       }
       if (imageFile == null && imageUrl == null) {
-        AppSnackbar.showSnackbarError('Please select a logo for your app');
+        AppSnackbar.showSnackbarError(globalNavigatorKey.currentContext!.l10n.addAppSelectLogo);
         return false;
       }
       for (var capability in selectedCapabilities) {
         if (capability.title == 'chat') {
           if (chatPromptController.text.isEmpty) {
-            AppSnackbar.showSnackbarError('Please enter a chat prompt for your app');
+            AppSnackbar.showSnackbarError(globalNavigatorKey.currentContext!.l10n.addAppEnterChatPrompt);
             return false;
           }
         }
         if (capability.title == 'memories') {
           if (conversationPromptController.text.isEmpty) {
-            AppSnackbar.showSnackbarError('Please enter a conversation prompt for your app');
+            AppSnackbar.showSnackbarError(globalNavigatorKey.currentContext!.l10n.addAppEnterConversationPrompt);
             return false;
           }
         }
         if (capability.title == 'external_integration') {
           if (triggerEvent == null) {
-            AppSnackbar.showSnackbarError('Please select a trigger event for your app');
+            AppSnackbar.showSnackbarError(globalNavigatorKey.currentContext!.l10n.addAppSelectTriggerEvent);
             return false;
           }
           if (webhookUrlController.text.isEmpty) {
-            AppSnackbar.showSnackbarError('Please enter a webhook URL for your app');
+            AppSnackbar.showSnackbarError(globalNavigatorKey.currentContext!.l10n.addAppEnterWebhookUrl);
             return false;
           }
           // Setup completed URL is optional, so we don't validate it here
         }
       }
       if (appCategory == null) {
-        AppSnackbar.showSnackbarError('Please select a category for your app');
+        AppSnackbar.showSnackbarError(globalNavigatorKey.currentContext!.l10n.addAppSelectCategory);
+        return false;
+      }
+      // Require source code URL for external integration or proactive notification apps
+      bool needsSourceCode = selectedCapabilities.any(
+        (cap) => cap.id == 'external_integration' || cap.id == 'proactive_notification',
+      );
+      if (needsSourceCode && sourceCodeUrlController.text.trim().isEmpty) {
+        AppSnackbar.showSnackbarError('GitHub repository URL is required for this app type');
         return false;
       }
       return true;
     } else {
-      AppSnackbar.showSnackbarError('Please fill in all the required fields correctly');
+      AppSnackbar.showSnackbarError(globalNavigatorKey.currentContext!.l10n.addAppFillRequiredFields);
       return false;
     }
   }
@@ -502,7 +578,9 @@ class AddAppProvider extends ChangeNotifier {
       'price': priceController.text.isNotEmpty ? double.parse(priceController.text) : 0.0,
       'payment_plan': selectePaymentPlan,
       'thumbnails': thumbnailIds,
+      'source_code_url': sourceCodeUrlController.text.trim().isNotEmpty ? sourceCodeUrlController.text.trim() : null,
     };
+
     for (var capability in selectedCapabilities) {
       if (capability.id == 'external_integration') {
         data['external_integration'] = {
@@ -511,6 +589,7 @@ class AddAppProvider extends ChangeNotifier {
           'setup_completed_url': setupCompletedController.text.trim(),
           'setup_instructions_file_path': instructionsController.text.trim(),
           'app_home_url': appHomeUrlController.text.trim(),
+          'chat_tools_manifest_url': chatToolsManifestUrlController.text.trim(),
           'auth_steps': [],
         };
         if (authUrlController.text.isNotEmpty) {
@@ -539,21 +618,55 @@ class AddAppProvider extends ChangeNotifier {
         data['proactive_notification']['scopes'] = selectedScopes.map((e) => e.id).toList();
       }
     }
+    final successMsg = globalNavigatorKey.currentContext?.l10n.addAppUpdatedSuccess;
+    final failMsg = globalNavigatorKey.currentContext?.l10n.addAppUpdateFailed;
     var success = false;
     var res = await updateAppServer(imageFile, data);
     if (res) {
-      await appProvider!.getApps();
-      var app = await getAppDetailsServer(updateAppId!);
-      appProvider!.updateLocalApp(App.fromJson(app!));
-      AppSnackbar.showSnackbarSuccess('App updated successfully 🚀');
+      await appProvider?.getApps();
+      if (updateAppId != null) {
+        var app = await getAppDetailsServer(updateAppId!);
+        if (app != null) {
+          appProvider?.updateLocalApp(App.fromJson(app));
+        }
+      }
+      if (successMsg != null) AppSnackbar.showSnackbarSuccess(successMsg);
       clear();
       success = true;
     } else {
-      AppSnackbar.showSnackbarError('Failed to update app. Please try again later');
+      if (failMsg != null) AppSnackbar.showSnackbarError(failMsg);
       success = false;
     }
     checkValidity();
     setIsUpdating(false);
+    return success;
+  }
+
+  bool isRefreshingManifest = false;
+
+  void setIsRefreshingManifest(bool value) {
+    isRefreshingManifest = value;
+    notifyListeners();
+  }
+
+  Future<bool> refreshManifest() async {
+    if (updateAppId == null) {
+      AppSnackbar.showSnackbarError('App ID not found');
+      return false;
+    }
+
+    setIsRefreshingManifest(true);
+    var success = await refreshAppManifestServer(updateAppId!);
+    if (success) {
+      var app = await getAppDetailsServer(updateAppId!);
+      if (app != null) {
+        appProvider!.updateLocalApp(App.fromJson(app));
+        AppSnackbar.showSnackbarSuccess('Manifest refreshed successfully');
+      }
+    } else {
+      AppSnackbar.showSnackbarError('Failed to refresh manifest');
+    }
+    setIsRefreshingManifest(false);
     return success;
   }
 
@@ -572,7 +685,9 @@ class AddAppProvider extends ChangeNotifier {
       'price': priceController.text.isNotEmpty ? double.parse(priceController.text) : 0.0,
       'payment_plan': selectePaymentPlan,
       'thumbnails': thumbnailIds,
+      'source_code_url': sourceCodeUrlController.text.trim().isNotEmpty ? sourceCodeUrlController.text.trim() : null,
     };
+
     for (var capability in selectedCapabilities) {
       if (capability.id == 'external_integration') {
         data['external_integration'] = {
@@ -581,6 +696,7 @@ class AddAppProvider extends ChangeNotifier {
           'setup_completed_url': setupCompletedController.text.trim(),
           'setup_instructions_file_path': instructionsController.text.trim(),
           'app_home_url': appHomeUrlController.text.trim(),
+          'chat_tools_manifest_url': chatToolsManifestUrlController.text.trim(),
           'auth_steps': [],
         };
         if (authUrlController.text.isNotEmpty) {
@@ -612,7 +728,7 @@ class AddAppProvider extends ChangeNotifier {
     String? appId;
     var res = await submitAppServer(imageFile!, data);
     if (res.$1) {
-      AppSnackbar.showSnackbarSuccess('App submitted successfully 🚀');
+      AppSnackbar.showSnackbarSuccess(globalNavigatorKey.currentContext!.l10n.addAppSubmittedSuccess);
       await appProvider!.getApps();
       clear();
       appId = res.$3;
@@ -626,59 +742,64 @@ class AddAppProvider extends ChangeNotifier {
 
   Future pickImage() async {
     try {
-      debugPrint('🖼️ Attempting to pick image from gallery...');
+      Logger.debug('🖼️ Attempting to pick image from gallery...');
 
-      // Use file_picker for desktop platforms, image_picker for mobile
-      if (kIsWeb || Platform.isMacOS || Platform.isWindows || Platform.isLinux) {
-        debugPrint('🖼️ Using file_picker for desktop platform');
+      if (kIsWeb) {
+        Logger.debug('🖼️ Using file_picker for web platform');
         try {
           FilePickerResult? result = await FilePicker.platform.pickFiles(
             type: FileType.custom,
             allowedExtensions: ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp'],
             allowMultiple: false,
             dialogTitle: 'Select an image file',
-            withData: false, // Only get file path, not data
+            withData: false,
             withReadStream: false,
           );
 
           if (result != null && result.files.isNotEmpty && result.files.single.path != null) {
-            debugPrint('🖼️ Image picked successfully via file_picker: ${result.files.single.path}');
+            Logger.debug('🖼️ Image picked successfully via file_picker: ${result.files.single.path}');
             imageFile = File(result.files.single.path!);
-            debugPrint('🖼️ Image file set, notifying listeners...');
+            Logger.debug('🖼️ Image file set, notifying listeners...');
           } else {
-            debugPrint('🖼️ No image selected by user via file_picker');
+            Logger.debug('🖼️ No image selected by user via file_picker');
           }
         } on PlatformException catch (e) {
-          debugPrint('🖼️ FilePicker PlatformException: ${e.code} - ${e.message}');
-          AppSnackbar.showSnackbarError('Error opening file picker: ${e.message}');
+          Logger.debug('🖼️ FilePicker PlatformException: ${e.code} - ${e.message}');
+          AppSnackbar.showSnackbarError(
+            globalNavigatorKey.currentContext!.l10n.addAppErrorOpeningFilePicker(e.message ?? e.code),
+          );
         } catch (e) {
-          debugPrint('🖼️ FilePicker general error: $e');
-          AppSnackbar.showSnackbarError('Error selecting image: $e');
+          Logger.debug('🖼️ FilePicker general error: $e');
+          AppSnackbar.showSnackbarError(
+            globalNavigatorKey.currentContext!.l10n.addAppErrorSelectingImage(e.toString()),
+          );
         }
       } else {
-        debugPrint('🖼️ Using image_picker for mobile platform');
+        Logger.debug('🖼️ Using image_picker for mobile platform');
         ImagePicker imagePicker = ImagePicker();
         var file = await imagePicker.pickImage(source: ImageSource.gallery);
         if (file != null) {
-          debugPrint('🖼️ Image picked successfully via image_picker: ${file.path}');
+          Logger.debug('🖼️ Image picked successfully via image_picker: ${file.path}');
           imageFile = File(file.path);
-          debugPrint('🖼️ Image file set, notifying listeners...');
+          Logger.debug('🖼️ Image file set, notifying listeners...');
         } else {
-          debugPrint('🖼️ No image selected by user via image_picker');
+          Logger.debug('🖼️ No image selected by user via image_picker');
         }
       }
 
       notifyListeners();
     } on PlatformException catch (e) {
-      debugPrint('🖼️ PlatformException during image picking: ${e.code} - ${e.message}');
+      Logger.debug('🖼️ PlatformException during image picking: ${e.code} - ${e.message}');
       if (e.code == 'photo_access_denied') {
-        AppSnackbar.showSnackbarError('Photos permission denied. Please allow access to photos to select an image');
+        AppSnackbar.showSnackbarError(globalNavigatorKey.currentContext!.l10n.addAppPhotosPermissionDenied);
       } else {
-        AppSnackbar.showSnackbarError('Error selecting image: ${e.message ?? e.code}');
+        AppSnackbar.showSnackbarError(
+          globalNavigatorKey.currentContext!.l10n.addAppErrorSelectingImage(e.message ?? e.code),
+        );
       }
     } catch (e) {
-      debugPrint('🖼️ General exception during image picking: $e');
-      AppSnackbar.showSnackbarError('Error selecting image. Please try again.');
+      Logger.debug('🖼️ General exception during image picking: $e');
+      AppSnackbar.showSnackbarError(globalNavigatorKey.currentContext!.l10n.addAppErrorSelectingImageRetry);
     }
     checkValidity();
     notifyListeners();
@@ -686,13 +807,12 @@ class AddAppProvider extends ChangeNotifier {
 
   Future<void> pickThumbnail() async {
     try {
-      debugPrint('🖼️ Attempting to pick thumbnail from gallery...');
+      Logger.debug('🖼️ Attempting to pick thumbnail from gallery...');
 
       File? thumbnailFile;
 
-      // Use file_picker for desktop platforms, image_picker for mobile
-      if (kIsWeb || Platform.isMacOS || Platform.isWindows || Platform.isLinux) {
-        debugPrint('🖼️ Using file_picker for desktop platform (thumbnail)');
+      if (kIsWeb) {
+        Logger.debug('🖼️ Using file_picker for web platform (thumbnail)');
         try {
           FilePickerResult? result = await FilePicker.platform.pickFiles(
             type: FileType.custom,
@@ -704,61 +824,63 @@ class AddAppProvider extends ChangeNotifier {
           );
 
           if (result != null && result.files.isNotEmpty && result.files.single.path != null) {
-            debugPrint('🖼️ Thumbnail picked successfully via file_picker: ${result.files.single.path}');
+            Logger.debug('🖼️ Thumbnail picked successfully via file_picker: ${result.files.single.path}');
             thumbnailFile = File(result.files.single.path!);
           } else {
-            debugPrint('🖼️ No thumbnail selected by user via file_picker');
+            Logger.debug('🖼️ No thumbnail selected by user via file_picker');
             return;
           }
         } on PlatformException catch (e) {
-          debugPrint('🖼️ FilePicker PlatformException (thumbnail): ${e.code} - ${e.message}');
-          AppSnackbar.showSnackbarError('Error opening file picker: ${e.message}');
+          Logger.debug('🖼️ FilePicker PlatformException (thumbnail): ${e.code} - ${e.message}');
+          AppSnackbar.showSnackbarError(
+            globalNavigatorKey.currentContext!.l10n.addAppErrorOpeningFilePicker(e.message ?? e.code),
+          );
           return;
         } catch (e) {
-          debugPrint('🖼️ FilePicker general error (thumbnail): $e');
-          AppSnackbar.showSnackbarError('Error selecting thumbnail: $e');
+          Logger.debug('🖼️ FilePicker general error (thumbnail): $e');
+          AppSnackbar.showSnackbarError(
+            globalNavigatorKey.currentContext!.l10n.addAppErrorSelectingThumbnail(e.toString()),
+          );
           return;
         }
       } else {
-        debugPrint('🖼️ Using image_picker for mobile platform (thumbnail)');
+        Logger.debug('🖼️ Using image_picker for mobile platform (thumbnail)');
         ImagePicker imagePicker = ImagePicker();
-        var file = await imagePicker.pickImage(
-          source: ImageSource.gallery,
-          imageQuality: 85,
-        );
+        var file = await imagePicker.pickImage(source: ImageSource.gallery, imageQuality: 85);
         if (file != null) {
-          debugPrint('🖼️ Thumbnail picked successfully via image_picker: ${file.path}');
+          Logger.debug('🖼️ Thumbnail picked successfully via image_picker: ${file.path}');
           thumbnailFile = File(file.path);
         } else {
-          debugPrint('🖼️ No thumbnail selected by user via image_picker');
+          Logger.debug('🖼️ No thumbnail selected by user via image_picker');
           return;
         }
       }
 
-      if (thumbnailFile != null) {
-        setIsUploadingThumbnail(true);
+      setIsUploadingThumbnail(true);
 
-        // Upload thumbnail
-        debugPrint('🖼️ Uploading thumbnail...');
-        var result = await uploadAppThumbnail(thumbnailFile);
-        if (result.isNotEmpty) {
-          thumbnailUrls.add(result['thumbnail_url']!);
-          thumbnailIds.add(result['thumbnail_id']!);
-          debugPrint('🖼️ Thumbnail uploaded successfully');
-        }
-        setIsUploadingThumbnail(false);
+      // Upload thumbnail
+      Logger.debug('🖼️ Uploading thumbnail...');
+      var result = await uploadAppThumbnail(thumbnailFile);
+      if (result.isNotEmpty) {
+        thumbnailUrls.add(result['thumbnail_url']!);
+        thumbnailIds.add(result['thumbnail_id']!);
+        checkValidity();
+        Logger.debug('🖼️ Thumbnail uploaded successfully');
       }
+      setIsUploadingThumbnail(false);
     } on PlatformException catch (e) {
-      debugPrint('🖼️ PlatformException during thumbnail picking: ${e.code} - ${e.message}');
+      Logger.debug('🖼️ PlatformException during thumbnail picking: ${e.code} - ${e.message}');
       if (e.code == 'photo_access_denied') {
-        AppSnackbar.showSnackbarError('Photos permission denied. Please allow access to photos to select an image');
+        AppSnackbar.showSnackbarError(globalNavigatorKey.currentContext!.l10n.addAppPhotosPermissionDenied);
       } else {
-        AppSnackbar.showSnackbarError('Error selecting thumbnail: ${e.message ?? e.code}');
+        AppSnackbar.showSnackbarError(
+          globalNavigatorKey.currentContext!.l10n.addAppErrorSelectingThumbnail(e.message ?? e.code),
+        );
       }
       setIsUploadingThumbnail(false);
     } catch (e) {
-      debugPrint('🖼️ General exception during thumbnail picking: $e');
-      AppSnackbar.showSnackbarError('Error selecting thumbnail. Please try again.');
+      Logger.debug('🖼️ General exception during thumbnail picking: $e');
+      AppSnackbar.showSnackbarError(globalNavigatorKey.currentContext!.l10n.addAppErrorSelectingThumbnailRetry);
       setIsUploadingThumbnail(false);
     }
     checkValidity();
@@ -779,8 +901,7 @@ class AddAppProvider extends ChangeNotifier {
 
   Future updateImage() async {
     try {
-      // Use file_picker for desktop platforms, image_picker for mobile
-      if (kIsWeb || Platform.isMacOS || Platform.isWindows || Platform.isLinux) {
+      if (kIsWeb) {
         FilePickerResult? result = await FilePicker.platform.pickFiles(
           type: FileType.custom,
           allowedExtensions: ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp'],
@@ -812,7 +933,7 @@ class AddAppProvider extends ChangeNotifier {
       notifyListeners();
     } on PlatformException catch (e) {
       if (e.code == 'photo_access_denied') {
-        AppSnackbar.showSnackbarError('Photos permission denied. Please allow access to photos to select an image');
+        AppSnackbar.showSnackbarError(globalNavigatorKey.currentContext!.l10n.addAppPhotosPermissionDenied);
       }
     }
     checkValidity();
@@ -824,9 +945,9 @@ class AddAppProvider extends ChangeNotifier {
       selectedCapabilities.remove(capability);
     } else {
       if (selectedCapabilities.length == 1 && selectedCapabilities.first.id == 'persona') {
-        AppSnackbar.showSnackbarError('Other capabilities cannot be selected with Persona');
+        AppSnackbar.showSnackbarError(globalNavigatorKey.currentContext!.l10n.addAppCapabilityConflictWithPersona);
       } else if (selectedCapabilities.isNotEmpty && capability.id == 'persona') {
-        AppSnackbar.showSnackbarError('Persona cannot be selected with other capabilities');
+        AppSnackbar.showSnackbarError(globalNavigatorKey.currentContext!.l10n.addAppPersonaConflictWithCapabilities);
       } else {
         selectedCapabilities.add(capability);
       }
@@ -902,6 +1023,7 @@ class AddAppProvider extends ChangeNotifier {
       return;
     }
     makeAppPublic = value;
+    checkValidity();
     notifyListeners();
   }
 

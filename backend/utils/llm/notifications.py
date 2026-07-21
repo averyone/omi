@@ -1,13 +1,52 @@
 import random
-from typing import Tuple, List
-from .clients import llm_medium
+from typing import Any, List, Protocol, Tuple, cast
+from .clients import get_llm
+from .usage_tracker import track_usage, Features
 from database.memories import get_memories
+from utils.executors import db_executor, run_blocking
+import logging
+
+logger = logging.getLogger(__name__)
+
+MemoryRecord = dict[str, Any]
 
 
-async def get_relevant_memories(uid: str, limit: int = 100) -> List[dict]:
+class AsyncLlm(Protocol):
+    async def ainvoke(self, input: object) -> object: ...
+
+
+def _response_text(response: object) -> str:
+    content = getattr(response, 'content', response)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        content_items = cast(list[object], content)
+        for item in content_items:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                block = cast(dict[str, object], item)
+                text = block.get('text') or block.get('content') or ''
+                if text:
+                    parts.append(str(text))
+            elif item is not None:
+                parts.append(str(item))
+        return ''.join(parts)
+    return '' if content is None else str(content)
+
+
+def _memory_content(memory: MemoryRecord) -> str:
+    content = memory.get('content', '')
+    if isinstance(content, str):
+        return content
+    return str(content)
+
+
+async def get_relevant_memories(uid: str, limit: int = 100) -> List[MemoryRecord]:
     """Get recent relevant memories to personalize notifications."""
-    memories = get_memories(uid, limit=limit)
-    return memories
+    memories: List[MemoryRecord] = await run_blocking(db_executor, get_memories, uid, limit)
+    return [m for m in memories if not m.get('is_locked')]
 
 
 async def generate_notification_message(uid: str, name: str, plan_type: str = "basic") -> Tuple[str, str]:
@@ -18,7 +57,7 @@ async def generate_notification_message(uid: str, name: str, plan_type: str = "b
     memories = await get_relevant_memories(uid)
     memory_context = ""
     if memories:
-        memory_summaries = [m.get('content', '') for m in memories]
+        memory_summaries = [_memory_content(m) for m in memories]
         memory_context = "\nRecent memory themes:\n- " + "\n- ".join(memory_summaries)
 
     system_prompt = """Hey! I'm Omi, and I love sending little notes to my friends (that's you!). When I write to you, it's like texting a close friend - casual, real, and straight from the heart.
@@ -61,13 +100,14 @@ async def generate_notification_message(uid: str, name: str, plan_type: str = "b
     Return only the notification body text - make it personal, warm and engaging."""
 
     try:
-        response = await llm_medium.ainvoke(system_prompt + "\n" + user_prompt)
-        body = response.content
+        with track_usage(uid, Features.SUBSCRIPTION_NOTIFICATION):
+            response = await cast(AsyncLlm, get_llm('notifications')).ainvoke(system_prompt + "\n" + user_prompt)
+        body = _response_text(response)
         # Return placeholder title and generated body
         return "omi", body.strip()
 
     except Exception as e:
-        print(f"Error generating notification message: {e}")
+        logger.error(f"Error generating notification message: {e}")
 
     # Improved fallback messages with more personality
     return ("omi", f"Hey {name}! 👋 Thanks for being part of the Omi family! ✨")
@@ -81,7 +121,7 @@ async def generate_credit_limit_notification(uid: str, name: str) -> Tuple[str, 
     memories = await get_relevant_memories(uid, limit=50)
     memory_context = ""
     if memories:
-        memory_summaries = [m.get('content', '') for m in memories]  # Use all memories for context
+        memory_summaries = [_memory_content(m) for m in memories]  # Use all memories for context
         memory_context = f"\nRecent conversations include: {', '.join(memory_summaries[:100])}..."
 
     system_prompt = """You're Omi, and you need to gently let a user know they've hit their transcription limits while encouraging them to upgrade to unlimited. 
@@ -118,12 +158,13 @@ async def generate_credit_limit_notification(uid: str, name: str) -> Tuple[str, 
     Return only the notification body text."""
 
     try:
-        response = await llm_medium.ainvoke(system_prompt + "\n" + user_prompt)
-        body = response.content
+        with track_usage(uid, Features.SUBSCRIPTION_NOTIFICATION):
+            response = await cast(AsyncLlm, get_llm('notifications')).ainvoke(system_prompt + "\n" + user_prompt)
+        body = _response_text(response)
         return "omi", body.strip()
 
     except Exception as e:
-        print(f"Error generating credit limit notification: {e}")
+        logger.error(f"Error generating credit limit notification: {e}")
 
     # Fallback message
     return (

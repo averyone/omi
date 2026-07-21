@@ -1,51 +1,58 @@
 import 'dart:io';
+import 'package:omi/utils/platform/platform_manager.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
+import 'package:omi/app_globals.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/core/app_shell.dart';
-import 'package:omi/pages/persona/persona_provider.dart';
 import 'package:omi/services/auth_service.dart';
-import 'package:omi/pages/settings/about.dart';
-import 'package:omi/pages/settings/data_privacy_page.dart';
 import 'package:omi/pages/settings/developer.dart';
+import 'package:omi/pages/settings/notifications_settings_page.dart';
+import 'package:omi/pages/settings/permissions_page.dart';
 import 'package:omi/pages/settings/profile.dart';
+import 'package:omi/pages/memories/page.dart';
+import 'package:omi/pages/settings/integrations_page.dart';
 import 'package:omi/pages/settings/usage_page.dart';
+import 'package:omi/pages/referral/referral_page.dart';
+import 'package:omi/providers/device_provider.dart';
 import 'package:omi/providers/usage_provider.dart';
+import 'package:omi/models/subscription.dart';
+import 'package:omi/utils/auth/clear_user_state.dart';
 import 'package:omi/utils/other/temp.dart';
 import 'package:omi/utils/platform/platform_service.dart';
 import 'package:omi/widgets/dialog.dart';
-import 'package:intercom_flutter/intercom_flutter.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:provider/provider.dart';
+import 'package:omi/utils/l10n_extensions.dart';
 import 'package:url_launcher/url_launcher.dart';
-import 'package:share_plus/share_plus.dart';
 import 'package:device_info_plus/device_info_plus.dart';
+import 'package:omi/backend/http/api/announcements.dart';
+import 'package:omi/pages/announcements/changelog_sheet.dart';
 import 'device_settings.dart';
+import '../conversations/auto_sync_page.dart';
 import '../conversations/sync_page.dart';
 
-enum SettingsMode {
-  no_device,
-  omi,
+class _SearchableItem {
+  final String title;
+  final Widget icon;
+  final VoidCallback onTap;
+
+  const _SearchableItem({required this.title, required this.icon, required this.onTap});
 }
 
 class SettingsDrawer extends StatefulWidget {
-  final SettingsMode mode;
-
-  const SettingsDrawer({
-    super.key,
-    this.mode = SettingsMode.omi,
-  });
+  const SettingsDrawer({super.key});
 
   @override
   State<SettingsDrawer> createState() => _SettingsDrawerState();
 
-  static void show(BuildContext context, {SettingsMode mode = SettingsMode.omi}) {
+  static void show(BuildContext context) {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (context) => SettingsDrawer(mode: mode),
+      builder: (context) => const SettingsDrawer(),
     );
   }
 }
@@ -55,10 +62,24 @@ class _SettingsDrawerState extends State<SettingsDrawer> {
   String? buildVersion;
   String? shortDeviceInfo;
 
+  bool _isSearching = false;
+  String _searchQuery = '';
+  late TextEditingController _searchController;
+  late FocusNode _searchFocusNode;
+
   @override
   void initState() {
     super.initState();
+    _searchController = TextEditingController();
+    _searchFocusNode = FocusNode();
     _loadAppAndDeviceInfo();
+  }
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    _searchFocusNode.dispose();
+    super.dispose();
   }
 
   Future<String> _getShortDeviceInfo() async {
@@ -72,10 +93,10 @@ class _SettingsDrawerState extends State<SettingsDrawer> {
         final iosInfo = await deviceInfoPlugin.iosInfo;
         return '${iosInfo.name} — iOS ${iosInfo.systemVersion}';
       } else {
-        return 'Unknown Device';
+        return context.l10n.unknownDevice;
       }
     } catch (e) {
-      return 'Unknown Device';
+      return context.l10n.unknownDevice;
     }
   }
 
@@ -94,7 +115,7 @@ class _SettingsDrawerState extends State<SettingsDrawer> {
     } catch (e) {
       if (mounted) {
         setState(() {
-          shortDeviceInfo = 'Unknown Device';
+          shortDeviceInfo = context.l10n.unknownDevice;
         });
       }
     }
@@ -104,40 +125,71 @@ class _SettingsDrawerState extends State<SettingsDrawer> {
     required String title,
     required Widget icon,
     required VoidCallback onTap,
+    bool showBetaTag = false,
+    bool showNewTag = false,
+    Widget? trailingChip,
   }) {
     return GestureDetector(
       onTap: onTap,
       child: Container(
         margin: const EdgeInsets.only(bottom: 1),
-        decoration: BoxDecoration(
-          color: const Color(0xFF1C1C1E),
-          borderRadius: BorderRadius.circular(12),
-        ),
+        decoration: BoxDecoration(color: const Color(0xFF1C1C1E), borderRadius: BorderRadius.circular(20)),
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 18),
           child: Row(
             children: [
-              SizedBox(
-                width: 24,
-                height: 24,
-                child: icon,
-              ),
+              SizedBox(width: 24, height: 24, child: icon),
               const SizedBox(width: 16),
               Expanded(
-                child: Text(
-                  title,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 17,
-                    fontWeight: FontWeight.w400,
-                  ),
+                child: Row(
+                  children: [
+                    Text(
+                      title,
+                      style: const TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.w400),
+                    ),
+                    if (showBetaTag) ...[
+                      const SizedBox(width: 8),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: Colors.orange.withValues(alpha: 0.2),
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: Text(
+                          context.l10n.beta,
+                          style: const TextStyle(
+                            color: Colors.orange,
+                            fontSize: 10,
+                            fontWeight: FontWeight.w600,
+                            letterSpacing: 0.5,
+                          ),
+                        ),
+                      ),
+                    ],
+                    if (showNewTag) ...[
+                      const SizedBox(width: 8),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: Colors.green.withValues(alpha: 0.2),
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: Text(
+                          context.l10n.newTag,
+                          style: const TextStyle(
+                            color: Colors.green,
+                            fontSize: 10,
+                            fontWeight: FontWeight.w600,
+                            letterSpacing: 0.5,
+                          ),
+                        ),
+                      ),
+                    ],
+                    if (trailingChip != null) ...[const SizedBox(width: 8), trailingChip],
+                  ],
                 ),
               ),
-              const Icon(
-                Icons.chevron_right,
-                color: Color(0xFF3C3C43),
-                size: 20,
-              ),
+              const Icon(Icons.chevron_right, color: Color(0xFF3C3C43), size: 20),
             ],
           ),
         ),
@@ -147,13 +199,8 @@ class _SettingsDrawerState extends State<SettingsDrawer> {
 
   Widget _buildSectionContainer({required List<Widget> children}) {
     return Container(
-      decoration: BoxDecoration(
-        color: const Color(0xFF1C1C1E),
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: Column(
-        children: children,
-      ),
+      decoration: BoxDecoration(color: const Color(0xFF1C1C1E), borderRadius: BorderRadius.circular(20)),
+      child: Column(children: children),
     );
   }
 
@@ -169,22 +216,14 @@ class _SettingsDrawerState extends State<SettingsDrawer> {
       children: [
         Text(
           displayText,
-          style: const TextStyle(
-            color: Color(0xFF8E8E93),
-            fontSize: 13,
-            fontWeight: FontWeight.w400,
-          ),
+          style: const TextStyle(color: Color(0xFF8E8E93), fontSize: 13, fontWeight: FontWeight.w400),
         ),
         const SizedBox(width: 2),
         GestureDetector(
           onTap: _copyVersionInfo,
           child: Container(
             padding: const EdgeInsets.all(2),
-            child: const Icon(
-              Icons.copy,
-              size: 12,
-              color: Color(0xFF8E8E93),
-            ),
+            child: const Icon(Icons.copy, size: 12, color: Color(0xFF8E8E93)),
           ),
         ),
       ],
@@ -193,7 +232,7 @@ class _SettingsDrawerState extends State<SettingsDrawer> {
 
   Future<void> _copyVersionInfo() async {
     final versionPart = buildVersion != null ? 'Omi AI ${version ?? ""} ($buildVersion)' : 'Omi AI ${version ?? ""}';
-    final devicePart = shortDeviceInfo ?? 'Unknown Device';
+    final devicePart = shortDeviceInfo ?? context.l10n.unknownDevice;
     final fullVersionInfo = '$versionPart — $devicePart';
 
     await Clipboard.setData(ClipboardData(text: fullVersionInfo));
@@ -222,17 +261,13 @@ class _SettingsDrawerState extends State<SettingsDrawer> {
                 color: Colors.black87,
                 borderRadius: BorderRadius.circular(8),
                 boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withOpacity(0.2),
-                    blurRadius: 4,
-                    offset: const Offset(0, 2),
-                  ),
+                  BoxShadow(color: Colors.black.withValues(alpha: 0.2), blurRadius: 4, offset: const Offset(0, 2)),
                 ],
               ),
-              child: const Text(
-                'App and device details copied',
+              child: Text(
+                context.l10n.appAndDeviceCopied,
                 textAlign: TextAlign.center,
-                style: TextStyle(color: Colors.white, fontSize: 14),
+                style: const TextStyle(color: Colors.white, fontSize: 14),
               ),
             ),
           ),
@@ -247,286 +282,432 @@ class _SettingsDrawerState extends State<SettingsDrawer> {
     });
   }
 
+  List<_SearchableItem> _buildSearchableItems(BuildContext context) {
+    final deviceProvider = Provider.of<DeviceProvider>(context, listen: false);
+
+    void goToProfile() => routeToPage(context, const ProfilePage());
+    void goToNotifications() => routeToPage(context, const NotificationsSettingsPage());
+    void goToUsage() => Navigator.of(context).push(MaterialPageRoute(builder: (context) => const UsagePage()));
+    void goToSync() {
+      final page = SharedPreferencesUtil().deviceSupportsMultiFileSync ? const AutoSyncPage() : const SyncPage();
+      Navigator.of(context).push(MaterialPageRoute(builder: (context) => page));
+    }
+
+    void goToDevice() => Navigator.of(context).push(MaterialPageRoute(builder: (context) => const DeviceSettings()));
+    void goToIntegrations() =>
+        Navigator.of(context).push(MaterialPageRoute(builder: (context) => const IntegrationsPage()));
+    void goToPermissions() {
+      PlatformManager.instance.analytics.permissionsSettingsOpened();
+      routeToPage(context, const PermissionsPage());
+    }
+
+    void goToMemories() => routeToPage(context, const MemoriesPage());
+    void goToDeveloper() async => await routeToPage(context, const DeveloperSettingsPage());
+
+    final profileIcon = FaIcon(FontAwesomeIcons.solidUser, color: Color(0xFF8E8E93), size: 20);
+    final notifIcon = FaIcon(FontAwesomeIcons.solidBell, color: Color(0xFF8E8E93), size: 20);
+    final usageIcon = FaIcon(FontAwesomeIcons.chartLine, color: Color(0xFF8E8E93), size: 20);
+    final deviceIcon = FaIcon(FontAwesomeIcons.bluetooth, color: Color(0xFF8E8E93), size: 20);
+    final permIcon = FaIcon(FontAwesomeIcons.shieldHalved, color: Color(0xFF8E8E93), size: 20);
+    final memIcon = FaIcon(FontAwesomeIcons.brain, color: Color(0xFF8E8E93), size: 20);
+    final devIcon = FaIcon(FontAwesomeIcons.code, color: Color(0xFF8E8E93), size: 20);
+    final intIcon = FaIcon(FontAwesomeIcons.networkWired, color: Color(0xFF8E8E93), size: 20);
+    final syncIcon = FaIcon(FontAwesomeIcons.solidCloud, color: Color(0xFF8E8E93), size: 20);
+
+    final items = <_SearchableItem>[
+      // --- Profile ---
+      _SearchableItem(title: context.l10n.profile, icon: profileIcon, onTap: goToProfile),
+      _SearchableItem(title: context.l10n.name, icon: profileIcon, onTap: goToProfile),
+      _SearchableItem(title: context.l10n.email, icon: profileIcon, onTap: goToProfile),
+      _SearchableItem(title: context.l10n.language, icon: profileIcon, onTap: goToProfile),
+      _SearchableItem(title: context.l10n.customVocabulary, icon: profileIcon, onTap: goToProfile),
+      _SearchableItem(title: context.l10n.speechProfile, icon: profileIcon, onTap: goToProfile),
+      _SearchableItem(title: context.l10n.identifyingOthers, icon: profileIcon, onTap: goToProfile),
+      _SearchableItem(title: context.l10n.voiceResponseMode, icon: profileIcon, onTap: goToProfile),
+      if (Platform.isAndroid)
+        _SearchableItem(title: context.l10n.backgroundModeTitle, icon: profileIcon, onTap: goToProfile),
+      _SearchableItem(title: context.l10n.paymentMethods, icon: devIcon, onTap: goToDeveloper),
+      _SearchableItem(title: context.l10n.conversationDisplay, icon: devIcon, onTap: goToDeveloper),
+      _SearchableItem(title: context.l10n.dataPrivacy, icon: devIcon, onTap: goToDeveloper),
+      _SearchableItem(title: context.l10n.deleteAccountTitle, icon: profileIcon, onTap: goToProfile),
+      // --- Notifications ---
+      _SearchableItem(title: context.l10n.notifications, icon: notifIcon, onTap: goToNotifications),
+      _SearchableItem(title: context.l10n.notificationFrequency, icon: notifIcon, onTap: goToNotifications),
+      _SearchableItem(title: context.l10n.dailySummary, icon: notifIcon, onTap: goToNotifications),
+      _SearchableItem(title: context.l10n.deliveryTime, icon: notifIcon, onTap: goToNotifications),
+      // --- Plan & Usage ---
+      _SearchableItem(title: context.l10n.planAndUsage, icon: usageIcon, onTap: goToUsage),
+      // --- Offline Sync ---
+      _SearchableItem(title: context.l10n.offlineSync, icon: syncIcon, onTap: goToSync),
+      // --- Device Settings (only when connected) ---
+      if (deviceProvider.isConnected) ...[
+        _SearchableItem(title: context.l10n.deviceSettings, icon: deviceIcon, onTap: goToDevice),
+        _SearchableItem(title: context.l10n.deviceName, icon: deviceIcon, onTap: goToDevice),
+        _SearchableItem(title: context.l10n.firmware, icon: deviceIcon, onTap: goToDevice),
+        _SearchableItem(title: context.l10n.sdCardSync, icon: deviceIcon, onTap: goToDevice),
+        _SearchableItem(title: context.l10n.doubleTap, icon: deviceIcon, onTap: goToDevice),
+        _SearchableItem(title: context.l10n.ledBrightness, icon: deviceIcon, onTap: goToDevice),
+        _SearchableItem(title: context.l10n.micGain, icon: deviceIcon, onTap: goToDevice),
+      ],
+      // --- Integrations ---
+      _SearchableItem(title: context.l10n.integrations, icon: intIcon, onTap: goToIntegrations),
+      // --- Permissions ---
+      _SearchableItem(title: context.l10n.permissions, icon: permIcon, onTap: goToPermissions),
+      _SearchableItem(title: context.l10n.microphone, icon: permIcon, onTap: goToPermissions),
+      _SearchableItem(title: context.l10n.bluetooth, icon: permIcon, onTap: goToPermissions),
+      _SearchableItem(title: context.l10n.location, icon: permIcon, onTap: goToPermissions),
+      _SearchableItem(title: context.l10n.backgroundActivity, icon: permIcon, onTap: goToPermissions),
+      // --- Memories ---
+      _SearchableItem(title: context.l10n.memories, icon: memIcon, onTap: goToMemories),
+      // --- Support ---
+      if (PlatformService.isIntercomSupported) ...[
+        _SearchableItem(
+          title: context.l10n.feedbackBug,
+          icon: FaIcon(FontAwesomeIcons.solidEnvelope, color: Color(0xFF8E8E93), size: 20),
+          onTap: () async {
+            final Uri url = Uri.parse('https://feedback.omi.me/');
+            if (await canLaunchUrl(url)) await launchUrl(url, mode: LaunchMode.inAppBrowserView);
+          },
+        ),
+        _SearchableItem(
+          title: context.l10n.helpCenter,
+          icon: FaIcon(FontAwesomeIcons.book, color: Color(0xFF8E8E93), size: 20),
+          onTap: () async {
+            final Uri url = Uri.parse('https://help.omi.me/en/');
+            if (await canLaunchUrl(url)) {
+              try {
+                await launchUrl(url, mode: LaunchMode.inAppBrowserView);
+              } catch (e) {
+                await launchUrl(url, mode: LaunchMode.externalApplication);
+              }
+            }
+          },
+        ),
+      ],
+      // --- Developer ---
+      _SearchableItem(title: context.l10n.developerSettings, icon: devIcon, onTap: goToDeveloper),
+      _SearchableItem(title: context.l10n.apiKeys, icon: devIcon, onTap: goToDeveloper),
+      _SearchableItem(title: context.l10n.debugAndDiagnostics, icon: devIcon, onTap: goToDeveloper),
+      _SearchableItem(title: context.l10n.conversationEvents, icon: devIcon, onTap: goToDeveloper),
+      _SearchableItem(title: context.l10n.realTimeTranscript, icon: devIcon, onTap: goToDeveloper),
+      _SearchableItem(title: context.l10n.audioBytes, icon: devIcon, onTap: goToDeveloper),
+      _SearchableItem(title: context.l10n.daySummary, icon: devIcon, onTap: goToDeveloper),
+      _SearchableItem(title: context.l10n.autoCreateSpeakers, icon: devIcon, onTap: goToDeveloper),
+      _SearchableItem(title: context.l10n.goalTracker, icon: devIcon, onTap: goToDeveloper),
+      _SearchableItem(title: context.l10n.apiEnvironment, icon: devIcon, onTap: goToDeveloper),
+      // --- What's New ---
+      _SearchableItem(
+        title: context.l10n.whatsNew,
+        icon: FaIcon(FontAwesomeIcons.solidStar, color: Color(0xFF8E8E93), size: 20),
+        onTap: () {
+          PlatformManager.instance.analytics.whatsNewOpened();
+          ChangelogSheet.showWithLoading(context, () => getAppChangelogs(limit: 5));
+        },
+      ),
+      // --- Referral ---
+      _SearchableItem(
+        title: context.l10n.referralProgram,
+        icon: FaIcon(FontAwesomeIcons.gift, color: Color(0xFF8E8E93), size: 20),
+        onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (context) => const ReferralPage())),
+      ),
+      // --- Sign Out ---
+      _SearchableItem(
+        title: context.l10n.signOut,
+        icon: FaIcon(FontAwesomeIcons.rightFromBracket, color: Color(0xFF8E8E93), size: 20),
+        onTap: () async {
+          final navigator = Navigator.of(context);
+          navigator.pop();
+          await showDialog(
+            context: context,
+            builder: (ctx) {
+              return getDialog(
+                ctx,
+                () => Navigator.of(ctx).pop(),
+                () async {
+                  Navigator.of(ctx).pop();
+                  final rootCtx = globalNavigatorKey.currentContext;
+                  if (rootCtx != null && rootCtx.mounted) {
+                    clearAllUserState(rootCtx);
+                  }
+                  await SharedPreferencesUtil().clear();
+                  await AuthService.instance.signOut();
+                  if (rootCtx != null && rootCtx.mounted) {
+                    routeToPage(rootCtx, const AppShell(), replace: true);
+                  }
+                },
+                context.l10n.signOutQuestion,
+                context.l10n.signOutConfirmation,
+              );
+            },
+          );
+        },
+      ),
+    ];
+
+    return items;
+  }
+
+  Widget _buildSearchResults(BuildContext context) {
+    final allItems = _buildSearchableItems(context);
+    final query = _searchQuery.toLowerCase();
+    final filtered = allItems.where((item) => item.title.toLowerCase().contains(query)).toList();
+
+    if (filtered.isEmpty) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.only(top: 48),
+          child: Text(
+            'No results',
+            style: const TextStyle(color: Color(0xFF8E8E93), fontSize: 16, fontWeight: FontWeight.w400),
+          ),
+        ),
+      );
+    }
+
+    return Column(
+      children:
+          filtered.map((item) => _buildSettingsItem(title: item.title, icon: item.icon, onTap: item.onTap)).toList(),
+    );
+  }
+
   Widget _buildOmiModeContent(BuildContext context) {
-    return Consumer<UsageProvider>(builder: (context, usageProvider, child) {
-      final bool showSubscription = usageProvider.subscription?.showSubscriptionUi ?? false;
-      return Column(
-        children: [
-          // Profile & Notifications Section
-          _buildSectionContainer(
-            children: [
-              _buildSettingsItem(
-                title: 'Profile',
-                icon: const FaIcon(FontAwesomeIcons.solidUser, color: Color(0xFF8E8E93), size: 20),
-                onTap: () {
-                  Navigator.pop(context);
-                  routeToPage(context, const ProfilePage());
-                },
-              ),
-              const Divider(height: 1, color: Color(0xFF3C3C43)),
-              _buildSettingsItem(
-                title: showSubscription ? 'Plan & Usage' : 'Usage Insights',
-                icon: const FaIcon(FontAwesomeIcons.chartBar, color: Color(0xFF8E8E93), size: 20),
-                onTap: () {
-                  Navigator.pop(context);
-                  Navigator.of(context).push(
-                    MaterialPageRoute(
-                      builder: (context) => const UsagePage(),
-                    ),
-                  );
-                },
-              ),
-              const Divider(height: 1, color: Color(0xFF3C3C43)),
-              _buildSettingsItem(
-                title: 'Storage',
-                icon: const FaIcon(FontAwesomeIcons.database, color: Color(0xFF8E8E93), size: 20),
-                onTap: () {
-                  Navigator.pop(context);
-                  Navigator.of(context).push(
-                    MaterialPageRoute(
-                      builder: (context) => const SyncPage(),
-                    ),
-                  );
-                },
-              ),
-              const Divider(height: 1, color: Color(0xFF3C3C43)),
-              _buildSettingsItem(
-                title: 'Device Settings',
-                icon: const FaIcon(FontAwesomeIcons.bluetooth, color: Color(0xFF8E8E93), size: 20),
-                onTap: () {
-                  Navigator.pop(context);
-                  Navigator.of(context).push(
-                    MaterialPageRoute(
-                      builder: (context) => const DeviceSettings(),
-                    ),
-                  );
-                },
-              ),
-            ],
-          ),
-          const SizedBox(height: 32),
-
-          // Share & Get Section
-          _buildSectionContainer(
-            children: [
-              if (PlatformService.isIOS)
-                _buildSettingsItem(
-                  title: 'Share Omi for iPhone',
-                  icon: const FaIcon(FontAwesomeIcons.solidShareFromSquare, color: Colors.white, size: 20),
-                  onTap: () async {
-                    Navigator.pop(context);
-                    await Share.share('https://apps.apple.com/us/app/omi-ai-scale-yourself/id6502156163');
-                  },
-                ),
-              if (PlatformService.isAndroid)
-                _buildSettingsItem(
-                  title: 'Share Omi for Android',
-                  icon: const FaIcon(FontAwesomeIcons.googlePlay, color: Color(0xFF8E8E93), size: 20),
-                  onTap: () async {
-                    Navigator.pop(context);
-                    await Share.share('https://play.google.com/store/apps/details?id=com.friend.ios');
-                  },
-                ),
-              const Divider(height: 1, color: Color(0xFF3C3C43)),
-              _buildSettingsItem(
-                title: 'Share Omi for Mac',
-                icon: const FaIcon(FontAwesomeIcons.desktop, color: Color(0xFF8E8E93), size: 20),
-                onTap: () async {
-                  Navigator.pop(context);
-                  await Share.share('https://apps.apple.com/us/app/omi-ai-scale-yourself/id6502156163');
-                },
-              ),
-            ],
-          ),
-          const SizedBox(height: 32),
-
-          // Support Section
-          if (PlatformService.isIntercomSupported)
+    return Consumer<UsageProvider>(
+      builder: (context, usageProvider, child) {
+        return Column(
+          children: [
+            // Profile & Notifications Section
             _buildSectionContainer(
               children: [
+                // Wrapped 2025 - temporarily disabled
+                // _buildSettingsItem(
+                //   title: context.l10n.wrapped2025,
+                //   icon: FaIcon(FontAwesomeIcons.gift, color: Color(0xFF8E8E93), size: 20),
+                //   showNewTag: true,
+                //   onTap: () {
+                //     Navigator.of(context).push(
+                //       MaterialPageRoute(
+                //         builder: (context) => const Wrapped2025Page(),
+                //       ),
+                //     );
+                //   },
+                // ),
+                // const Divider(height: 1, color: Color(0xFF3C3C43)),
                 _buildSettingsItem(
-                  title: 'Send Feedback',
-                  icon: const FaIcon(FontAwesomeIcons.solidEnvelope, color: Color(0xFF8E8E93), size: 20),
-                  onTap: () async {
-                    Navigator.pop(context);
-                    final Uri url = Uri.parse('https://feedback.omi.me/');
-                    if (await canLaunchUrl(url)) {
-                      await launchUrl(url, mode: LaunchMode.inAppBrowserView);
-                    }
+                  title: context.l10n.profile,
+                  icon: FaIcon(FontAwesomeIcons.solidUser, color: Color(0xFF8E8E93), size: 20),
+                  onTap: () {
+                    routeToPage(context, const ProfilePage());
                   },
                 ),
                 const Divider(height: 1, color: Color(0xFF3C3C43)),
                 _buildSettingsItem(
-                  title: 'Report a bug',
-                  icon: const FaIcon(FontAwesomeIcons.exclamationTriangle, color: Color(0xFF8E8E93), size: 20),
-                  onTap: () async {
-                    Navigator.pop(context);
-                    final Uri url = Uri.parse('https://feedback.omi.me/');
-                    if (await canLaunchUrl(url)) {
-                      await launchUrl(url, mode: LaunchMode.inAppBrowserView);
-                    }
+                  title: context.l10n.notifications,
+                  icon: FaIcon(FontAwesomeIcons.solidBell, color: Color(0xFF8E8E93), size: 20),
+                  onTap: () {
+                    routeToPage(context, const NotificationsSettingsPage());
+                  },
+                ),
+                const Divider(height: 1, color: Color(0xFF3C3C43)),
+                Consumer<UsageProvider>(
+                  builder: (context, usageProvider, child) {
+                    final sp = usageProvider.subscription?.subscription.plan;
+                    final isUnlimited = sp?.isPaid ?? false;
+                    return _buildSettingsItem(
+                      title: context.l10n.planAndUsage,
+                      icon: FaIcon(FontAwesomeIcons.chartLine, color: Color(0xFF8E8E93), size: 20),
+                      trailingChip: isUnlimited
+                          ? Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                              decoration: BoxDecoration(
+                                color: Colors.amber.withValues(alpha: 0.2),
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  FaIcon(FontAwesomeIcons.crown, color: Colors.amber, size: 10),
+                                  const SizedBox(width: 4),
+                                  Text(
+                                    context.l10n.pro.toUpperCase(),
+                                    style: const TextStyle(
+                                      color: Colors.amber,
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.w600,
+                                      letterSpacing: 0.5,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            )
+                          : null,
+                      onTap: () {
+                        Navigator.of(context).push(MaterialPageRoute(builder: (context) => const UsagePage()));
+                      },
+                    );
                   },
                 ),
                 const Divider(height: 1, color: Color(0xFF3C3C43)),
                 _buildSettingsItem(
-                  title: 'Help Center',
-                  icon: const FaIcon(FontAwesomeIcons.book, color: Color(0xFF8E8E93), size: 20),
-                  onTap: () async {
-                    Navigator.pop(context);
-                    final Uri url = Uri.parse('https://help.omi.me/en/');
-                    if (await canLaunchUrl(url)) {
-                      await launchUrl(url, mode: LaunchMode.inAppBrowserView);
+                  title: context.l10n.offlineSync,
+                  icon: FaIcon(FontAwesomeIcons.solidCloud, color: Color(0xFF8E8E93), size: 20),
+                  onTap: () {
+                    final page =
+                        SharedPreferencesUtil().deviceSupportsMultiFileSync ? const AutoSyncPage() : const SyncPage();
+                    Navigator.of(context).push(MaterialPageRoute(builder: (context) => page));
+                  },
+                ),
+                Consumer<DeviceProvider>(
+                  builder: (context, deviceProvider, child) {
+                    if (!deviceProvider.isConnected) {
+                      return const SizedBox.shrink();
                     }
+                    return Column(
+                      children: [
+                        const Divider(height: 1, color: Color(0xFF3C3C43)),
+                        _buildSettingsItem(
+                          title: context.l10n.deviceSettings,
+                          icon: FaIcon(FontAwesomeIcons.bluetooth, color: Color(0xFF8E8E93), size: 20),
+                          onTap: () {
+                            Navigator.of(context).push(MaterialPageRoute(builder: (context) => const DeviceSettings()));
+                          },
+                        ),
+                      ],
+                    );
+                  },
+                ),
+                const Divider(height: 1, color: Color(0xFF3C3C43)),
+                _buildSettingsItem(
+                  title: context.l10n.integrations,
+                  icon: FaIcon(FontAwesomeIcons.networkWired, color: Color(0xFF8E8E93), size: 20),
+                  showBetaTag: true,
+                  onTap: () {
+                    Navigator.of(context).push(MaterialPageRoute(builder: (context) => const IntegrationsPage()));
+                  },
+                ),
+                const Divider(height: 1, color: Color(0xFF3C3C43)),
+                _buildSettingsItem(
+                  title: context.l10n.permissions,
+                  icon: FaIcon(FontAwesomeIcons.shieldHalved, color: Color(0xFF8E8E93), size: 20),
+                  onTap: () {
+                    PlatformManager.instance.analytics.permissionsSettingsOpened();
+                    routeToPage(context, const PermissionsPage());
                   },
                 ),
               ],
             ),
-          if (PlatformService.isIntercomSupported) const SizedBox(height: 32),
+            const SizedBox(height: 32),
 
-          // Privacy & Settings Section
-          _buildSectionContainer(
-            children: [
-              _buildSettingsItem(
-                title: 'Data & Privacy',
-                icon: const FaIcon(FontAwesomeIcons.shield, color: Color(0xFF8E8E93), size: 20),
-                onTap: () {
-                  Navigator.pop(context);
-                  Navigator.of(context).push(
-                    MaterialPageRoute(
-                      builder: (context) => const DataPrivacyPage(),
-                    ),
-                  );
-                },
-              ),
-              const Divider(height: 1, color: Color(0xFF3C3C43)),
-              _buildSettingsItem(
-                title: 'Developer Mode',
-                icon: const FaIcon(FontAwesomeIcons.code, color: Color(0xFF8E8E93), size: 20),
-                onTap: () async {
-                  Navigator.pop(context);
-                  await routeToPage(context, const DeveloperSettingsPage());
-                },
-              ),
-              const Divider(height: 1, color: Color(0xFF3C3C43)),
-              _buildSettingsItem(
-                title: 'About Omi',
-                icon: const FaIcon(FontAwesomeIcons.infoCircle, color: Color(0xFF8E8E93), size: 20),
-                onTap: () {
-                  Navigator.pop(context);
-                  routeToPage(context, const AboutOmiPage());
-                },
-              ),
-            ],
-          ),
-          const SizedBox(height: 32),
-
-          // Sign Out Section
-          _buildSectionContainer(
-            children: [
-              _buildSettingsItem(
-                title: 'Sign Out',
-                icon: const FaIcon(FontAwesomeIcons.signOutAlt, color: Color(0xFF8E8E93), size: 20),
-                onTap: () async {
-                  // Capture the provider reference before any navigation
-                  final personaProvider = Provider.of<PersonaProvider>(context, listen: false);
-                  final navigator = Navigator.of(context);
-
-                  navigator.pop(); // Close the settings drawer
-
-                  await showDialog(
-                    context: context,
-                    builder: (ctx) {
-                      return getDialog(
-                        ctx,
-                        () => Navigator.of(ctx).pop(),
-                        () async {
-                          Navigator.of(ctx).pop();
-                          await SharedPreferencesUtil().clear();
-                          await AuthService.instance.signOut();
-                          personaProvider.setRouting(PersonaProfileRouting.no_device);
-                          routeToPage(context, const AppShell(), replace: true);
-                        },
-                        "Sign Out?",
-                        "Are you sure you want to sign out?",
-                      );
+            // Support & Settings Section
+            _buildSectionContainer(
+              children: [
+                if (PlatformService.isIntercomSupported) ...[
+                  _buildSettingsItem(
+                    title: context.l10n.feedbackBug,
+                    icon: FaIcon(FontAwesomeIcons.solidEnvelope, color: Color(0xFF8E8E93), size: 20),
+                    onTap: () async {
+                      final Uri url = Uri.parse('https://feedback.omi.me/');
+                      if (await canLaunchUrl(url)) {
+                        await launchUrl(url, mode: LaunchMode.inAppBrowserView);
+                      }
                     },
-                  );
-                },
-              ),
-            ],
-          ),
-          const SizedBox(height: 32),
-
-          // Version Info
-          _buildVersionInfoSection(),
-          const SizedBox(height: 24),
-        ],
-      );
-    });
-  }
-
-  Widget _buildNoDeviceModeContent(BuildContext context) {
-    return Column(
-      children: [
-        // Support Section
-        _buildSectionContainer(
-          children: [
-            _buildSettingsItem(
-              title: 'Need Help? Chat with us',
-              icon: const FaIcon(FontAwesomeIcons.solidComments, color: Color(0xFF8E8E93), size: 20),
-              onTap: () async {
-                Navigator.pop(context);
-                await Intercom.instance.displayMessenger();
-              },
-            ),
-          ],
-        ),
-        const SizedBox(height: 32),
-
-        // Sign Out Section
-        _buildSectionContainer(
-          children: [
-            _buildSettingsItem(
-              title: 'Sign Out',
-              icon: const FaIcon(FontAwesomeIcons.signOutAlt, color: Color(0xFF8E8E93), size: 20),
-              onTap: () async {
-                // Capture the provider reference before any navigation
-                final personaProvider = Provider.of<PersonaProvider>(context, listen: false);
-                final navigator = Navigator.of(context);
-
-                navigator.pop(); // Close the settings drawer
-
-                await showDialog(
-                  context: context,
-                  builder: (ctx) {
-                    return getDialog(
-                      ctx,
-                      () => Navigator.of(ctx).pop(),
-                      () async {
-                        Navigator.of(ctx).pop(); // Close dialog first
-                        SharedPreferencesUtil().hasOmiDevice = null;
-                        SharedPreferencesUtil().verifiedPersonaId = null;
-                        personaProvider.setRouting(PersonaProfileRouting.no_device);
-                        await AuthService.instance.signOut();
-                        if (context.mounted) {
-                          routeToPage(context, const AppShell(), replace: true);
+                  ),
+                  const Divider(height: 1, color: Color(0xFF3C3C43)),
+                  _buildSettingsItem(
+                    title: context.l10n.helpCenter,
+                    icon: FaIcon(FontAwesomeIcons.book, color: Color(0xFF8E8E93), size: 20),
+                    onTap: () async {
+                      final Uri url = Uri.parse('https://help.omi.me/en/');
+                      if (await canLaunchUrl(url)) {
+                        try {
+                          await launchUrl(url, mode: LaunchMode.inAppBrowserView);
+                        } catch (e) {
+                          await launchUrl(url, mode: LaunchMode.externalApplication);
                         }
+                      }
+                    },
+                  ),
+                  const Divider(height: 1, color: Color(0xFF3C3C43)),
+                ],
+                _buildSettingsItem(
+                  title: context.l10n.developerSettings,
+                  icon: FaIcon(FontAwesomeIcons.code, color: Color(0xFF8E8E93), size: 20),
+                  onTap: () async {
+                    await routeToPage(context, const DeveloperSettingsPage());
+                  },
+                ),
+                const Divider(height: 1, color: Color(0xFF3C3C43)),
+                _buildSettingsItem(
+                  title: context.l10n.whatsNew,
+                  icon: FaIcon(FontAwesomeIcons.solidStar, color: Color(0xFF8E8E93), size: 20),
+                  onTap: () {
+                    PlatformManager.instance.analytics.whatsNewOpened();
+                    ChangelogSheet.showWithLoading(context, () => getAppChangelogs(limit: 5));
+                  },
+                ),
+                const Divider(height: 1, color: Color(0xFF3C3C43)),
+                _buildSettingsItem(
+                  title: context.l10n.referralProgram,
+                  icon: FaIcon(FontAwesomeIcons.gift, color: Color(0xFF8E8E93), size: 20),
+                  showNewTag: true,
+                  onTap: () {
+                    Navigator.of(context).push(MaterialPageRoute(builder: (context) => const ReferralPage()));
+                  },
+                ),
+              ],
+            ),
+            const SizedBox(height: 32),
+
+            // Sign Out Section
+            _buildSectionContainer(
+              children: [
+                _buildSettingsItem(
+                  title: context.l10n.signOut,
+                  icon: FaIcon(FontAwesomeIcons.rightFromBracket, color: Color(0xFF8E8E93), size: 20),
+                  onTap: () async {
+                    final navigator = Navigator.of(context);
+
+                    navigator.pop(); // Close the settings drawer
+
+                    await showDialog(
+                      context: context,
+                      builder: (ctx) {
+                        return getDialog(
+                          ctx,
+                          () => Navigator.of(ctx).pop(),
+                          () async {
+                            Navigator.of(ctx).pop();
+                            // The drawer's context is unmounted by the time we
+                            // get here (we popped it before opening the
+                            // confirm dialog), so routing through it is a
+                            // silent no-op. Use the root navigator instead so
+                            // we always land back on the auth screen.
+                            final rootCtx = globalNavigatorKey.currentContext;
+                            if (rootCtx != null && rootCtx.mounted) {
+                              clearAllUserState(rootCtx);
+                            }
+                            await SharedPreferencesUtil().clear();
+                            await AuthService.instance.signOut();
+                            if (rootCtx != null && rootCtx.mounted) {
+                              routeToPage(rootCtx, const AppShell(), replace: true);
+                            }
+                          },
+                          context.l10n.signOutQuestion,
+                          context.l10n.signOutConfirmation,
+                        );
                       },
-                      "Sign Out?",
-                      "Are you sure you want to sign out?",
                     );
                   },
-                );
-              },
+                ),
+              ],
             ),
-          ],
-        ),
-        const SizedBox(height: 32),
+            const SizedBox(height: 32),
 
-        // Version Info
-        _buildVersionInfoSection(),
-        const SizedBox(height: 24),
-      ],
+            // Version Info
+            _buildVersionInfoSection(),
+            const SizedBox(height: 24),
+          ],
+        );
+      },
     );
   }
 
@@ -536,67 +717,130 @@ class _SettingsDrawerState extends State<SettingsDrawer> {
       height: MediaQuery.of(context).size.height * 0.9,
       decoration: const BoxDecoration(
         color: Color(0xFF000000),
-        borderRadius: BorderRadius.only(
-          topLeft: Radius.circular(16),
-          topRight: Radius.circular(16),
-        ),
+        borderRadius: BorderRadius.only(topLeft: Radius.circular(28), topRight: Radius.circular(28)),
       ),
-      child: Column(
-        children: [
-          // Handle bar
-          Container(
-            margin: const EdgeInsets.only(top: 8),
-            height: 4,
-            width: 36,
-            decoration: BoxDecoration(
-              color: const Color(0xFF3C3C43),
-              borderRadius: BorderRadius.circular(2),
+      child: ClipRRect(
+        borderRadius: const BorderRadius.only(topLeft: Radius.circular(28), topRight: Radius.circular(28)),
+        child: Column(
+          children: [
+            // Handle bar
+            Container(
+              margin: const EdgeInsets.only(top: 8),
+              height: 4,
+              width: 36,
+              decoration: BoxDecoration(color: const Color(0xFF3C3C43), borderRadius: BorderRadius.circular(2)),
             ),
-          ),
-          // Header
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-            child: Stack(
-              children: [
-                // Centered title
-                Center(
-                  child: const Text(
-                    'Settings',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 18,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
-                // Done button positioned to the right
-                Positioned(
-                  right: 0,
-                  child: GestureDetector(
-                    onTap: () => Navigator.pop(context),
-                    child: const Text(
-                      'Done',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontSize: 17,
-                        fontWeight: FontWeight.w400,
+            // Header
+            AnimatedSwitcher(
+              duration: const Duration(milliseconds: 200),
+              transitionBuilder: (child, animation) => FadeTransition(opacity: animation, child: child),
+              child: _isSearching
+                  ? Padding(
+                      key: const ValueKey('search-header'),
+                      padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: TextFormField(
+                              controller: _searchController,
+                              focusNode: _searchFocusNode,
+                              autofocus: true,
+                              style: const TextStyle(color: Colors.white, fontSize: 14),
+                              cursorColor: Colors.white,
+                              decoration: InputDecoration(
+                                hintText: context.l10n.searchSettings,
+                                hintStyle: const TextStyle(color: Colors.white60, fontSize: 14),
+                                filled: true,
+                                fillColor: const Color(0xFF1C1C1E),
+                                border: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(24),
+                                  borderSide: BorderSide.none,
+                                ),
+                                focusedBorder: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(24),
+                                  borderSide: BorderSide.none,
+                                ),
+                                enabledBorder: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(24),
+                                  borderSide: BorderSide.none,
+                                ),
+                                prefixIcon: const Icon(Icons.search, color: Colors.white60),
+                                suffixIcon: _searchQuery.isNotEmpty
+                                    ? GestureDetector(
+                                        onTap: () {
+                                          setState(() => _searchQuery = '');
+                                          _searchController.clear();
+                                        },
+                                        child: const Icon(Icons.close, color: Colors.white60),
+                                      )
+                                    : null,
+                                contentPadding: const EdgeInsets.symmetric(horizontal: 12),
+                              ),
+                              onChanged: (value) => setState(() => _searchQuery = value),
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          GestureDetector(
+                            onTap: () {
+                              setState(() {
+                                _isSearching = false;
+                                _searchQuery = '';
+                                _searchController.clear();
+                              });
+                              _searchFocusNode.unfocus();
+                            },
+                            child: Text(context.l10n.cancel, style: const TextStyle(color: Colors.white, fontSize: 16)),
+                          ),
+                        ],
+                      ),
+                    )
+                  : Padding(
+                      key: const ValueKey('normal-header'),
+                      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+                      child: Row(
+                        children: [
+                          GestureDetector(
+                            onTap: () {
+                              setState(() => _isSearching = true);
+                              Future.microtask(() => _searchFocusNode.requestFocus());
+                            },
+                            child: const Icon(Icons.search, color: Colors.white, size: 22),
+                          ),
+                          Expanded(
+                            child: Center(
+                              child: Text(
+                                context.l10n.settings,
+                                style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w600),
+                              ),
+                            ),
+                          ),
+                          GestureDetector(
+                            onTap: () => Navigator.pop(context),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                              decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20)),
+                              child: Text(
+                                context.l10n.done,
+                                style: const TextStyle(color: Colors.black, fontSize: 14, fontWeight: FontWeight.w600),
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
                     ),
-                  ),
-                ),
-              ],
             ),
-          ),
-          const SizedBox(height: 16),
-          // Content
-          Expanded(
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.symmetric(horizontal: 20),
-              child:
-                  widget.mode == SettingsMode.omi ? _buildOmiModeContent(context) : _buildNoDeviceModeContent(context),
+            const SizedBox(height: 16),
+            // Content
+            Expanded(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.symmetric(horizontal: 20),
+                child: _isSearching && _searchQuery.isNotEmpty
+                    ? _buildSearchResults(context)
+                    : _buildOmiModeContent(context),
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }

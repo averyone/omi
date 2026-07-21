@@ -65,67 +65,32 @@ class ResponsiveHelper {
   double heightPercent(double percentage) => _screenHeight * (percentage / 100);
 
   // Enhanced responsive sizing with premium constraints
-  double responsiveWidth({
-    double baseWidth = 100,
-    double? minWidth,
-    double? maxWidth,
-  }) {
+  double responsiveWidth({double baseWidth = 100, double? minWidth, double? maxWidth}) {
     final calculatedWidth = baseWidth * _scaleFactor;
-    return calculatedWidth.clamp(
-      minWidth ?? calculatedWidth * 0.7,
-      maxWidth ?? calculatedWidth * 1.3,
-    );
+    return calculatedWidth.clamp(minWidth ?? calculatedWidth * 0.7, maxWidth ?? calculatedWidth * 1.3);
   }
 
-  double responsiveHeight({
-    double baseHeight = 100,
-    double? minHeight,
-    double? maxHeight,
-  }) {
+  double responsiveHeight({double baseHeight = 100, double? minHeight, double? maxHeight}) {
     final calculatedHeight = baseHeight * _scaleFactor;
-    return calculatedHeight.clamp(
-      minHeight ?? calculatedHeight * 0.7,
-      maxHeight ?? calculatedHeight * 1.3,
-    );
+    return calculatedHeight.clamp(minHeight ?? calculatedHeight * 0.7, maxHeight ?? calculatedHeight * 1.3);
   }
 
   // Premium typography scaling with sophisticated hierarchy
-  double responsiveFontSize({
-    required double baseFontSize,
-    double? minFontSize,
-    double? maxFontSize,
-  }) {
+  double responsiveFontSize({required double baseFontSize, double? minFontSize, double? maxFontSize}) {
     final calculatedSize = baseFontSize * _scaleFactor;
-    return calculatedSize.clamp(
-      minFontSize ?? baseFontSize * 0.8,
-      maxFontSize ?? baseFontSize * 1.2,
-    );
+    return calculatedSize.clamp(minFontSize ?? baseFontSize * 0.8, maxFontSize ?? baseFontSize * 1.2);
   }
 
   // Refined spacing system for premium layouts
-  double spacing({
-    required double baseSpacing,
-    double? minSpacing,
-    double? maxSpacing,
-  }) {
+  double spacing({required double baseSpacing, double? minSpacing, double? maxSpacing}) {
     final calculatedSpacing = baseSpacing * _scaleFactor;
-    return calculatedSpacing.clamp(
-      minSpacing ?? baseSpacing * 0.6,
-      maxSpacing ?? baseSpacing * 1.4,
-    );
+    return calculatedSpacing.clamp(minSpacing ?? baseSpacing * 0.6, maxSpacing ?? baseSpacing * 1.4);
   }
 
   // Premium icon sizing
-  double iconSize({
-    required double baseSize,
-    double? minSize,
-    double? maxSize,
-  }) {
+  double iconSize({required double baseSize, double? minSize, double? maxSize}) {
     final calculatedSize = baseSize * _scaleFactor;
-    return calculatedSize.clamp(
-      minSize ?? baseSize * 0.7,
-      maxSize ?? baseSize * 1.3,
-    );
+    return calculatedSize.clamp(minSize ?? baseSize * 0.7, maxSize ?? baseSize * 1.3);
   }
 
   // Premium container max width with sophisticated constraints
@@ -142,11 +107,11 @@ class ResponsiveHelper {
   // Premium sidebar width calculation
   double sidebarWidth({double baseWidth = 320}) {
     if (_isSmallScreen) {
-      return widthPercent(26).clamp(220, 280);
+      return widthPercent(24).clamp(200, 250);
     } else if (_isMediumScreen) {
-      return widthPercent(24).clamp(280, 320);
+      return widthPercent(22).clamp(220, 280);
     } else {
-      return baseWidth.clamp(300, 380);
+      return baseWidth.clamp(220, 320);
     }
   }
 
@@ -168,29 +133,17 @@ class ResponsiveHelper {
 
   // Premium button sizing
   double buttonHeight({double baseHeight = 52}) {
-    return responsiveHeight(
-      baseHeight: baseHeight,
-      minHeight: 44,
-      maxHeight: 60,
-    );
+    return responsiveHeight(baseHeight: baseHeight, minHeight: 44, maxHeight: 60);
   }
 
   // Premium grid calculations
-  int gridCrossAxisCount({
-    int baseCount = 3,
-    int smallScreenCount = 2,
-    int largeScreenCount = 4,
-  }) {
+  int gridCrossAxisCount({int baseCount = 3, int smallScreenCount = 2, int largeScreenCount = 4}) {
     if (_isSmallScreen) return smallScreenCount;
     if (_isLargeScreen) return largeScreenCount;
     return baseCount;
   }
 
-  double gridChildAspectRatio({
-    double baseRatio = 2.8,
-    double smallScreenRatio = 2.2,
-    double largeScreenRatio = 3.2,
-  }) {
+  double gridChildAspectRatio({double baseRatio = 2.8, double smallScreenRatio = 2.2, double largeScreenRatio = 3.2}) {
     if (_isSmallScreen) return smallScreenRatio;
     if (_isLargeScreen) return largeScreenRatio;
     return baseRatio;
@@ -207,11 +160,7 @@ class ResponsiveHelper {
     double? maxFontSize,
   }) {
     return TextStyle(
-      fontSize: responsiveFontSize(
-        baseFontSize: baseFontSize,
-        minFontSize: minFontSize,
-        maxFontSize: maxFontSize,
-      ),
+      fontSize: responsiveFontSize(baseFontSize: baseFontSize, minFontSize: minFontSize, maxFontSize: maxFontSize),
       fontWeight: fontWeight,
       color: color,
       height: height,
@@ -276,29 +225,14 @@ class ResponsiveHelper {
         height: 1.4,
       );
 
-  TextStyle get bodyLarge => responsiveTextStyle(
-        baseFontSize: 16,
-        minFontSize: 14,
-        maxFontSize: 18,
-        color: textSecondary,
-        height: 1.5,
-      );
+  TextStyle get bodyLarge =>
+      responsiveTextStyle(baseFontSize: 16, minFontSize: 14, maxFontSize: 18, color: textSecondary, height: 1.5);
 
-  TextStyle get bodyMedium => responsiveTextStyle(
-        baseFontSize: 14,
-        minFontSize: 13,
-        maxFontSize: 16,
-        color: textSecondary,
-        height: 1.5,
-      );
+  TextStyle get bodyMedium =>
+      responsiveTextStyle(baseFontSize: 14, minFontSize: 13, maxFontSize: 16, color: textSecondary, height: 1.5);
 
-  TextStyle get bodySmall => responsiveTextStyle(
-        baseFontSize: 12,
-        minFontSize: 11,
-        maxFontSize: 14,
-        color: textTertiary,
-        height: 1.4,
-      );
+  TextStyle get bodySmall =>
+      responsiveTextStyle(baseFontSize: 12, minFontSize: 11, maxFontSize: 14, color: textTertiary, height: 1.4);
 
   TextStyle get labelLarge => responsiveTextStyle(
         baseFontSize: 16,
@@ -317,11 +251,8 @@ class ResponsiveHelper {
       );
 
   // Premium gradient definitions
-  LinearGradient get purpleGradient => const LinearGradient(
-        begin: Alignment.topLeft,
-        end: Alignment.bottomRight,
-        colors: [purplePrimary, purpleAccent],
-      );
+  LinearGradient get purpleGradient =>
+      const LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight, colors: [purplePrimary, purpleAccent]);
 
   LinearGradient get purpleLightGradient => const LinearGradient(
         begin: Alignment.topLeft,
@@ -338,7 +269,7 @@ class ResponsiveHelper {
   // Premium shadow definitions
   List<BoxShadow> get softShadow => [
         BoxShadow(
-          color: Colors.black.withOpacity(0.1),
+          color: Colors.black.withValues(alpha: 0.1),
           blurRadius: spacing(baseSpacing: 12, minSpacing: 8, maxSpacing: 16),
           offset: Offset(0, spacing(baseSpacing: 4, minSpacing: 2, maxSpacing: 6)),
         ),
@@ -346,7 +277,7 @@ class ResponsiveHelper {
 
   List<BoxShadow> get mediumShadow => [
         BoxShadow(
-          color: Colors.black.withOpacity(0.15),
+          color: Colors.black.withValues(alpha: 0.15),
           blurRadius: spacing(baseSpacing: 20, minSpacing: 15, maxSpacing: 25),
           offset: Offset(0, spacing(baseSpacing: 8, minSpacing: 6, maxSpacing: 10)),
         ),
@@ -354,7 +285,7 @@ class ResponsiveHelper {
 
   List<BoxShadow> get strongShadow => [
         BoxShadow(
-          color: Colors.black.withOpacity(0.25),
+          color: Colors.black.withValues(alpha: 0.25),
           blurRadius: spacing(baseSpacing: 30, minSpacing: 20, maxSpacing: 40),
           offset: Offset(0, spacing(baseSpacing: 12, minSpacing: 8, maxSpacing: 16)),
         ),
@@ -362,7 +293,7 @@ class ResponsiveHelper {
 
   List<BoxShadow> get glowShadow => [
         BoxShadow(
-          color: purplePrimary.withOpacity(0.3),
+          color: purplePrimary.withValues(alpha: 0.3),
           blurRadius: spacing(baseSpacing: 20, minSpacing: 15, maxSpacing: 25),
           offset: Offset(0, spacing(baseSpacing: 8, minSpacing: 6, maxSpacing: 10)),
         ),

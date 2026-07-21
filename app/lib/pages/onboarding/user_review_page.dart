@@ -1,9 +1,14 @@
 import 'dart:io';
+
+import 'package:omi/utils/platform/platform_manager.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
-import 'package:in_app_review/in_app_review.dart';
-import 'package:omi/utils/analytics/mixpanel.dart';
+import 'package:url_launcher/url_launcher.dart';
+
+import 'package:omi/utils/l10n_extensions.dart';
+import 'package:omi/utils/logger.dart';
 
 class UserReviewPage extends StatefulWidget {
   final VoidCallback goNext;
@@ -16,50 +21,37 @@ class UserReviewPage extends StatefulWidget {
 
 class _UserReviewPageState extends State<UserReviewPage> {
   bool _isLoading = false;
-  final InAppReview _inAppReview = InAppReview.instance;
 
   Future<void> _requestReview() async {
     setState(() {
       _isLoading = true;
     });
 
-    try {
-      HapticFeedback.mediumImpact();
+    HapticFeedback.mediumImpact();
 
-      // Check if the in-app review is available
-      if (await _inAppReview.isAvailable()) {
-        // Request the review and wait for completion
-        await _inAppReview.requestReview();
-        MixpanelManager().track('App Review Requested', properties: {'source': 'onboarding'});
+    final Uri reviewUrl = Platform.isIOS
+        ? Uri.parse('https://apps.apple.com/app/id6502156163?action=write-review')
+        : Uri.parse('https://play.google.com/store/apps/details?id=com.friend.ios');
 
-        // Add a small delay to ensure the review dialog has been processed
-        await Future.delayed(const Duration(milliseconds: 1000));
-      } else {
-        // Fallback to opening the store directly
-        await _inAppReview.openStoreListing(
-          appStoreId: Platform.isIOS ? '6651027111' : null, // Replace with actual App Store ID
-        );
-        MixpanelManager().track('App Store Opened', properties: {'source': 'onboarding'});
-
-        // Add delay for store opening
-        await Future.delayed(const Duration(milliseconds: 500));
-      }
-    } catch (e) {
-      debugPrint('Error requesting review: $e');
-      // Show a friendly message or continue silently
-    } finally {
-      setState(() {
-        _isLoading = false;
-      });
-
-      // Continue to next page after review interaction is complete
-      widget.goNext();
+    if (await canLaunchUrl(reviewUrl)) {
+      await launchUrl(reviewUrl, mode: LaunchMode.externalApplication);
+      PlatformManager.instance.analytics.track('App Review Opened', properties: {'source': 'onboarding'});
+      await Future.delayed(const Duration(milliseconds: 500));
+    } else {
+      Logger.debug('Could not launch review URL');
     }
+
+    setState(() {
+      _isLoading = false;
+    });
+
+    // Continue to next page after review interaction is complete
+    widget.goNext();
   }
 
   Future<void> _skipReview() async {
     HapticFeedback.lightImpact();
-    MixpanelManager().track('App Review Skipped', properties: {'source': 'onboarding'});
+    PlatformManager.instance.analytics.track('App Review Skipped', properties: {'source': 'onboarding'});
     widget.goNext();
   }
 
@@ -78,10 +70,7 @@ class _UserReviewPageState extends State<UserReviewPage> {
           padding: EdgeInsets.fromLTRB(32, 8, 32, 4),
           decoration: const BoxDecoration(
             color: Colors.black,
-            borderRadius: BorderRadius.only(
-              topLeft: Radius.circular(40),
-              topRight: Radius.circular(40),
-            ),
+            borderRadius: BorderRadius.only(topLeft: Radius.circular(40), topRight: Radius.circular(40)),
           ),
           child: SafeArea(
             top: false,
@@ -107,13 +96,8 @@ class _UserReviewPageState extends State<UserReviewPage> {
 
                 // Subtitle
                 Text(
-                  'Help us reach more people by leaving a review in the ${Platform.isIOS ? 'App Store' : 'Google Play Store'}. Your feedback means the world to us!',
-                  style: const TextStyle(
-                    color: Colors.grey,
-                    fontSize: 16,
-                    height: 1.4,
-                    fontFamily: 'Manrope',
-                  ),
+                  Platform.isIOS ? context.l10n.leaveReviewIos : context.l10n.leaveReviewAndroid,
+                  style: const TextStyle(color: Colors.grey, fontSize: 16, height: 1.4, fontFamily: 'Manrope'),
                   textAlign: TextAlign.center,
                 ),
 
@@ -128,19 +112,14 @@ class _UserReviewPageState extends State<UserReviewPage> {
                     style: ElevatedButton.styleFrom(
                       backgroundColor: Colors.deepPurple,
                       foregroundColor: Colors.white,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(28),
-                      ),
-                      disabledBackgroundColor: Colors.deepPurple.withOpacity(0.5),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
+                      disabledBackgroundColor: Colors.deepPurple.withValues(alpha: 0.5),
                     ),
                     child: _isLoading
                         ? const SizedBox(
                             width: 20,
                             height: 20,
-                            child: CircularProgressIndicator(
-                              color: Colors.white,
-                              strokeWidth: 2,
-                            ),
+                            child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2),
                           )
                         : Row(
                             mainAxisAlignment: MainAxisAlignment.center,
@@ -151,11 +130,8 @@ class _UserReviewPageState extends State<UserReviewPage> {
                               ),
                               const SizedBox(width: 12),
                               Text(
-                                'Rate on ${Platform.isIOS ? 'App Store' : 'Google Play'}',
-                                style: const TextStyle(
-                                  fontSize: 16,
-                                  fontWeight: FontWeight.w600,
-                                ),
+                                Platform.isIOS ? context.l10n.rateOnAppStore : context.l10n.rateOnGooglePlay,
+                                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
                               ),
                             ],
                           ),
@@ -165,13 +141,7 @@ class _UserReviewPageState extends State<UserReviewPage> {
                 // Skip button
                 TextButton(
                   onPressed: _isLoading ? null : _skipReview,
-                  child: const Text(
-                    'Maybe later',
-                    style: TextStyle(
-                      color: Colors.grey,
-                      fontSize: 16,
-                    ),
-                  ),
+                  child: Text(context.l10n.maybeLater, style: const TextStyle(color: Colors.grey, fontSize: 16)),
                 ),
               ],
             ),

@@ -1,13 +1,16 @@
+import 'package:omi/utils/platform/platform_manager.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
-import 'package:omi/backend/schema/app.dart';
-import 'package:omi/pages/apps/app_detail/app_detail.dart';
-import 'package:omi/pages/settings/widgets/data_protection_section.dart';
-import 'package:omi/providers/app_provider.dart';
-import 'package:omi/providers/user_provider.dart';
-import 'package:omi/utils/other/temp.dart';
+
 import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
+
+import 'package:omi/backend/schema/app.dart';
+import 'package:omi/pages/apps/app_detail/app_detail.dart';
+import 'package:omi/providers/app_provider.dart';
+import 'package:omi/providers/user_provider.dart';
+import 'package:omi/utils/l10n_extensions.dart';
+import 'package:omi/utils/other/temp.dart';
 
 class DataPrivacyPage extends StatefulWidget {
   const DataPrivacyPage({super.key});
@@ -20,45 +23,42 @@ class _DataPrivacyPageState extends State<DataPrivacyPage> {
   @override
   void initState() {
     super.initState();
+    PlatformManager.instance.analytics.dataPrivacyPageOpened();
   }
 
-  Widget _buildIntroSection(BuildContext context) {
+  Widget _buildEncryptionBanner(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
+      padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
         color: const Color(0xFF1A1A1A),
         borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: const Color(0xFF35343B), width: 1),
       ),
-      child: Column(
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text(
-            '🛡️',
-            style: TextStyle(fontSize: 64),
+          Container(
+            width: 40,
+            height: 40,
+            decoration: BoxDecoration(
+              color: Colors.deepPurple.withValues(alpha: 0.15),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Icon(Icons.lock_outline, color: Colors.deepPurple.shade200, size: 20),
           ),
-          const SizedBox(height: 16),
-          const Text(
-            'Your Privacy, Your Control',
-            style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: Colors.white),
-            textAlign: TextAlign.center,
-          ),
-          const SizedBox(height: 12),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16.0),
+          const SizedBox(width: 14),
+          Expanded(
             child: RichText(
-              textAlign: TextAlign.center,
               text: TextSpan(
-                style: TextStyle(fontSize: 16, color: Colors.grey.shade400, height: 1.5),
+                style: TextStyle(fontSize: 14, color: Colors.grey.shade300, height: 1.5),
                 children: [
-                  const TextSpan(
-                    text:
-                        'At Omi, we are committed to protecting your privacy. This page allows you to control how your data is stored and used. ',
-                  ),
+                  TextSpan(text: '${context.l10n.dataEncryptedBanner} '),
                   TextSpan(
-                    text: 'Learn more...',
+                    text: context.l10n.learnMore,
                     style: TextStyle(
-                      color: Colors.deepPurple.shade300,
+                      color: Colors.deepPurple.shade200,
                       decoration: TextDecoration.underline,
-                      decorationColor: Colors.deepPurple.shade300,
+                      decorationColor: Colors.deepPurple.shade200,
                     ),
                     recognizer: TapGestureRecognizer()
                       ..onTap = () async {
@@ -77,38 +77,37 @@ class _DataPrivacyPageState extends State<DataPrivacyPage> {
     );
   }
 
-  String _getAccessDescription(App app) {
+  String _getAccessDescription(BuildContext context, App app) {
     List<String> accessTypes = [];
     if (app.hasConversationsAccess()) {
-      accessTypes.add('Conversations');
+      accessTypes.add(context.l10n.conversations);
     }
     if (app.hasMemoriesAccess()) {
-      accessTypes.add('Memories');
+      accessTypes.add(context.l10n.memories);
     }
 
     String accessDescription = '';
     if (accessTypes.isNotEmpty) {
-      accessDescription = 'Accesses ${accessTypes.join(' & ')}';
+      accessDescription = context.l10n.accessesDataTypes(accessTypes.join(' & '));
     }
 
     final trigger = app.externalIntegration?.getTriggerOnString();
     String triggerDescription = '';
     if (trigger != null && trigger != 'Unknown') {
-      triggerDescription = 'triggered by ${trigger.toLowerCase()}';
+      triggerDescription = context.l10n.triggeredByType(trigger.toLowerCase());
     }
 
     if (accessDescription.isNotEmpty && triggerDescription.isNotEmpty) {
-      return '$accessDescription and is $triggerDescription.';
+      return context.l10n.accessesAndTriggeredBy(accessDescription, triggerDescription);
     }
     if (accessDescription.isNotEmpty) {
       return '$accessDescription.';
     }
     if (triggerDescription.isNotEmpty) {
-      var sentence = 'Is $triggerDescription.';
-      return sentence[0].toUpperCase() + sentence.substring(1);
+      return context.l10n.isTriggeredBy(triggerDescription);
     }
 
-    return 'No specific data access configured.';
+    return context.l10n.noSpecificDataAccessConfigured;
   }
 
   @override
@@ -123,15 +122,9 @@ class _DataPrivacyPageState extends State<DataPrivacyPage> {
           appBar: AppBar(
             backgroundColor: Theme.of(context).colorScheme.primary,
             automaticallyImplyLeading: true,
-            title: const Text(
-              'Data & Privacy',
-              style: TextStyle(fontSize: 22, fontWeight: FontWeight.w600),
-            ),
+            title: Text(context.l10n.dataPrivacy, style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w600)),
             centerTitle: true,
-            leading: IconButton(
-              icon: const Icon(Icons.arrow_back_ios_new),
-              onPressed: () => Navigator.pop(context),
-            ),
+            leading: IconButton(icon: const Icon(Icons.arrow_back_ios_new), onPressed: () => Navigator.pop(context)),
             elevation: 0,
           ),
           body: Stack(
@@ -139,22 +132,8 @@ class _DataPrivacyPageState extends State<DataPrivacyPage> {
               ListView(
                 padding: const EdgeInsets.all(16.0),
                 children: [
-                  _buildIntroSection(context),
+                  _buildEncryptionBanner(context),
                   const SizedBox(height: 32),
-                  const Text(
-                    'Data Protection Level',
-                    style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    'Your data is secured by default with strong encryption. Review your settings and future privacy options below.',
-                    style: TextStyle(color: Colors.grey.shade400, fontSize: 14),
-                  ),
-                  const SizedBox(height: 16),
-                  const DataProtectionSection(),
-                  const SizedBox(height: 24),
-                  const Divider(color: Colors.grey),
-                  const SizedBox(height: 24),
                   Consumer<AppProvider>(
                     builder: (context, appProvider, child) {
                       final appsWithDataAccess =
@@ -163,15 +142,12 @@ class _DataPrivacyPageState extends State<DataPrivacyPage> {
                       return Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          const Text(
-                            'App Access',
-                            style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),
+                          Text(
+                            context.l10n.appAccess,
+                            style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),
                           ),
                           const SizedBox(height: 8),
-                          Text(
-                            'The following apps can access your data. Tap on an app to manage its permissions.',
-                            style: TextStyle(color: Colors.grey.shade400, fontSize: 14),
-                          ),
+                          Text(context.l10n.appAccessDesc, style: TextStyle(color: Colors.grey.shade400, fontSize: 14)),
                           const SizedBox(height: 16),
                           if (appsWithDataAccess.isEmpty)
                             Container(
@@ -187,7 +163,7 @@ class _DataPrivacyPageState extends State<DataPrivacyPage> {
                                     Icon(Icons.apps_outlined, color: Colors.grey.shade600, size: 32),
                                     const SizedBox(height: 16),
                                     Text(
-                                      'No installed apps have external access to your data.',
+                                      context.l10n.noAppsExternalAccess,
                                       textAlign: TextAlign.center,
                                       style: TextStyle(color: Colors.grey.shade400),
                                     ),
@@ -209,12 +185,10 @@ class _DataPrivacyPageState extends State<DataPrivacyPage> {
                                   clipBehavior: Clip.antiAlias,
                                   child: ListTile(
                                     contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                                    leading: CircleAvatar(
-                                      backgroundImage: NetworkImage(app.getImageUrl()),
-                                    ),
+                                    leading: CircleAvatar(backgroundImage: NetworkImage(app.getImageUrl())),
                                     title: Text(app.getName()),
                                     subtitle: Text(
-                                      _getAccessDescription(app),
+                                      _getAccessDescription(context, app),
                                       style: TextStyle(color: Colors.grey.shade400, fontSize: 12),
                                     ),
                                     trailing: const Icon(Icons.arrow_forward_ios, size: 16),
@@ -234,10 +208,8 @@ class _DataPrivacyPageState extends State<DataPrivacyPage> {
               ),
               if (isLoading && !isMigrating)
                 Container(
-                  color: Colors.black.withOpacity(0.5),
-                  child: const Center(
-                    child: CircularProgressIndicator(),
-                  ),
+                  color: Colors.black.withValues(alpha: 0.5),
+                  child: const Center(child: CircularProgressIndicator()),
                 ),
             ],
           ),

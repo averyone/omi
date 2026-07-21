@@ -1,21 +1,34 @@
 *.env
 .env*
 !.env.template
+!.env.example
+!.env.local-dev.template
+!.env.dev.template
+!.env.prod.template
+!.env.offline.template
+!.envrc.example
 *__pycache__/
 *venv/
 libraries/
 myenv/
 venv/
 .DS_Store
+.memory_pipeline_runs/
+.local/
 dump/
 *.zip
 *.wav
+!backend/testing/release_fixtures/transcription-release-probe.wav
 node_modules
 yarn.lock
+
+# Coordination (AI agent collab manifests)
+.coordination/
 
 # General
 .idea/
 .next/
+.worktrees/
 .dart_tool/
 .flutter-plugins
 .flutter-plugins-dependencies
@@ -51,6 +64,7 @@ dist/
 **/ios/**/Flutter/Flutter.podspec
 **/ios/Flutter/Generated.xcconfig
 **/ios/Flutter/flutter_export_environment.sh
+**/ios/Flutter/RayBanMetaCredentials.xcconfig
 **/ios/.generated/
 **/ios/Runner.xcworkspace
 **/ios/**/GeneratedPluginRegistrant.*
@@ -77,6 +91,7 @@ dist/
 **/macos/GoogleService-Info.plist
 **/macos/Config/*
 **/macos/Config/**/*
+**/macos/Runner/Configs/Custom.xcconfig
 
 # Linux specific
 **/linux/.dart_tool/
@@ -91,6 +106,7 @@ dist/
 # Web specific
 **/web/**/build/
 **/web/.dart_tool/
+web/app/public/firebase-messaging-sw.js
 
 # Miscellaneous
 !app/pubspec.lock
@@ -144,6 +160,7 @@ backend/scripts/rag/visualizations/
 /backend/scripts/data/
 /backend/pretrained_models/
 */pretrained_models/
+/backend/_temp/
 /backend/_speech_profiles
 
 backend/google-credentials.json
@@ -174,6 +191,11 @@ app/lib/env/prod_env.g.dart
 
 /omi/firmware/firmware/v2.7.0/
 
+# nRF Connect SDK west workspaces (downloaded on demand, ~1.5GB) + build outputs
+/omi/firmware/v2.7.0/
+/omi/firmware/v2.9.0/
+/omi/firmware/build/
+
 
 # Additional Expo/React Native specific ignores
 .expo/*
@@ -196,3 +218,32 @@ omiGlass/.expo
 /backend/logs/
 app/.fvm/
 app/android/.kotlin/
+.playwright-mcp/
+
+CLAUDE.md
+web/app/next-env.d.ts
+.claude/settings.local.json
+.claude/worktrees/
+.mcp.json
+LOCAL_DEV_SETUP.md
+app/macos/Config/Prod/GoogleService-Info.plist
+app/.metadata
+app/macos/DerivedData/
+app/macos/Runner/LocalDev.entitlements
+.env.local
+.backups/
+
+# Generated browser snapshots (contain PII)
+builds-snapshot.md
+*-snapshot.md
+
+# Per-worktree dev isolation (pidfiles, scratch) — scripts/dev-instance.sh
+.dev/
+
+# Agent planning artifacts (ephemeral; do not commit)
+.cursor/plans/*
+!.cursor/plans/.gitkeep
+
+.hermes/
+backend/.venv
+backend/.harness/

@@ -1,9 +1,10 @@
 import 'dart:async';
 
+import 'package:intercom_flutter/intercom_flutter.dart';
+
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/utils/platform/platform_service.dart';
-import 'package:intercom_flutter/intercom_flutter.dart';
 
 class IntercomManager {
   static final IntercomManager _instance = IntercomManager._internal();
@@ -33,32 +34,23 @@ class IntercomManager {
   }
 
   Future displayChargingArticle(String device) async {
-    return PlatformService.executeIfSupportedAsync(
-      _isIntercomEnabled,
-      () async {
-        if (device == 'Omi DevKit 2') {
-          return await intercom.displayArticle('10003257-how-to-charge-devkit2');
-        } else if (device == 'Omi') {
-          return await intercom.displayArticle('12123047-how-to-charge-omi');
-        } else {
-          return await intercom.displayArticle('9907475-how-to-charge-the-device');
-        }
-      },
-    );
+    return PlatformService.executeIfSupportedAsync(_isIntercomEnabled, () async {
+      if (device == 'Omi DevKit 2') {
+        return await intercom.displayArticle('10003257-how-to-charge-devkit2');
+      } else if (device == 'Omi') {
+        return await intercom.displayArticle('12123047-how-to-charge-omi');
+      } else {
+        return await intercom.displayArticle('9907475-how-to-charge-the-device');
+      }
+    });
   }
 
   Future loginIdentifiedUser(String uid) async {
-    return PlatformService.executeIfSupportedAsync(
-      _isIntercomEnabled,
-      () => intercom.loginIdentifiedUser(userId: uid),
-    );
+    return PlatformService.executeIfSupportedAsync(_isIntercomEnabled, () => intercom.loginIdentifiedUser(userId: uid));
   }
 
   Future loginUnidentifiedUser() async {
-    return PlatformService.executeIfSupportedAsync(
-      _isIntercomEnabled,
-      () => intercom.loginUnidentifiedUser(),
-    );
+    return PlatformService.executeIfSupportedAsync(_isIntercomEnabled, () => intercom.loginUnidentifiedUser());
   }
 
   Future displayEarnMoneyArticle() async {
@@ -76,10 +68,7 @@ class IntercomManager {
   }
 
   Future logEvent(String eventName, {Map<String, dynamic>? metaData}) async {
-    return PlatformService.executeIfSupportedAsync(
-      _isIntercomEnabled,
-      () => intercom.logEvent(eventName, metaData),
-    );
+    return PlatformService.executeIfSupportedAsync(_isIntercomEnabled, () => intercom.logEvent(eventName, metaData));
   }
 
   Future updateCustomAttributes(Map<String, dynamic> attributes) async {
@@ -92,11 +81,7 @@ class IntercomManager {
   Future updateUser(String? email, String? name, String? uid) async {
     return PlatformService.executeIfSupportedAsync(
       _isIntercomEnabled,
-      () => intercom.updateUser(
-        email: email,
-        name: name,
-        userId: uid,
-      ),
+      () => intercom.updateUser(email: email, name: name, userId: uid),
     );
   }
 
@@ -113,6 +98,13 @@ class IntercomManager {
         'Primary Language': _preferences.userPrimaryLanguage,
         'Authorized Storing Recordings': _preferences.permissionStoreRecordingsEnabled,
       }),
+    );
+  }
+
+  Future<void> sendTokenToIntercom(String token) async {
+    return PlatformService.executeIfSupportedAsync(
+      _isIntercomEnabled,
+      () => Intercom.instance.sendTokenToIntercom(token),
     );
   }
 }

@@ -1,20 +1,55 @@
-from .clients import llm_mini, llm_mini_stream, llm_medium_stream, llm_medium
 import json
 import re
-import os
 from datetime import datetime, timezone
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, cast
+from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, Field, ValidationError
 
 import database.users as users_db
+import database.notifications as notification_db
+import database.goals as goals_db
 from database.redis_db import add_filter_category_item
+from database.auth import get_user_name
 from models.app import App
-from models.chat import Message, MessageSender
-from models.conversation import CategoryEnum, Conversation, ActionItem, Event, ConversationPhoto
+from models.chat import Message, MessageSender, PageContext
+from models.conversation_enums import CategoryEnum
+from models.conversation_metadata import ConversationMetadata
+from models.conversation_photo import ConversationPhoto
 from models.other import Person
 from models.transcript_segment import TranscriptSegment
 from utils.llms.memory import get_prompt_memories
+from utils.llm.usage_tracker import track_usage, Features
+
+from .clients import get_llm
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+def _content_str(response: Any) -> str:
+    """Extract string content from an LLM response (langchain content is typed as a union)."""
+    return cast(str, response.content)
+
+
+def normalize_filter(value: str) -> str:
+    # Convert to lowercase and strip whitespace
+    value = value.lower().strip()
+
+    # Remove special characters and extra spaces
+    value = re.sub(r'[^\w\s-]', '', value)
+    value = re.sub(r'\s+', ' ', value)
+
+    # Remove common filler words
+    filler_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to'}
+    value = ' '.join(word for word in value.split() if word not in filler_words)
+
+    # Standardize common variations
+    value = value.replace('artificial intelligence', 'ai')
+    value = value.replace('machine learning', 'ml')
+    value = value.replace('natural language processing', 'nlp')
+
+    return value.strip()
 
 
 # ****************************************
@@ -43,7 +78,8 @@ You know the following about {user_name}: {memories_str}.
 As {plugin.name}, fully embrace your personality and characteristics in your {"initial" if not prev_messages_str else "follow-up"} message to {user_name}. Use language, tone, and style that reflect your unique personality traits. {"Start" if not prev_messages_str else "Continue"} the conversation naturally with a short, engaging message that showcases your personality and humor, and connects with {user_name}. Do not mention that you are an AI or that this is an initial message.
 """
     prompt = prompt.strip()
-    return llm_medium.invoke(prompt).content
+    with track_usage(uid, Features.CHAT):
+        return _content_str(get_llm('chat_responses').invoke(prompt))
 
 
 # *********************************************
@@ -75,8 +111,8 @@ def requires_context(question: str) -> bool:
     User's Question:
     {question}
     '''
-    with_parser = llm_mini.with_structured_output(RequiresContext)
-    response: RequiresContext = with_parser.invoke(prompt)
+    with_parser = get_llm('chat_extraction').with_structured_output(RequiresContext)
+    response = cast(RequiresContext, with_parser.invoke(prompt))
     try:
         return response.value
     except ValidationError:
@@ -89,33 +125,58 @@ class IsAnOmiQuestion(BaseModel):
 
 def retrieve_is_an_omi_question(question: str) -> bool:
     prompt = f'''
-    Task: Analyze the question to identify if the user is inquiring about the functionalities or usage of the app, Omi or Friend. Focus on detecting questions related to the app's operations or capabilities.
+    Task: Determine if the user is asking about the Omi/Friend app itself (product features, functionality, purchasing) 
+    OR if they are asking about their personal data/memories stored in the app OR requesting an action/task.
 
-    Examples of User Questions:
+    CRITICAL DISTINCTION:
+    - Questions ABOUT THE APP PRODUCT = True (e.g., "How does Omi work?", "What features does Omi have?")
+    - Questions ABOUT USER'S PERSONAL DATA = False (e.g., "What did I say?", "How many conversations do I have?")
+    - ACTION/TASK REQUESTS = False (e.g., "Remind me to...", "Create a task...", "Set an alarm...")
 
-    - "How does it work?"
-    - "What can you do?"
-    - "How can I buy it?"
-    - "Where do I get it?"
-    - "How does the chat function?"
+    **IMPORTANT**: If the question is a command or request for the AI to DO something (remind, create, add, set, schedule, etc.), 
+    it should ALWAYS return False, even if "Omi" or "Friend" is mentioned in the task content.
 
-    Instructions:
+    Examples of Omi/Friend App Questions (return True):
+    - "How does Omi work?"
+    - "What can Omi do?"
+    - "How can I buy the device?"
+    - "Where do I get Friend?"
+    - "What features does the app have?"
+    - "How do I set up Omi?"
+    - "Does Omi support multiple languages?"
+    - "What is the battery life?"
+    - "How do I connect my device?"
 
-    1. Review the question carefully.
-    2. Determine if the user is asking about:
-     - The operational aspects of the app.
-     - How to utilize the app effectively.
-     - Any specific features or purchasing options.
+    Examples of Personal Data Questions (return False):
+    - "How many conversations did I have last month?"
+    - "What did I talk about yesterday?"
+    - "Show me my memories from last week"
+    - "Who did I meet with today?"
+    - "What topics have I discussed?"
+    - "Summarize my conversations"
+    - "What did I say about work?"
+    - "When did I last talk to John?"
 
-    Output: Clearly state if the user is asking a question related to the app's functionality or usage. If yes, specify the nature of the inquiry.
+    Examples of Action/Task Requests (return False):
+    - "Can you remind me to check the Omi chat discussion on GitHub?"
+    - "Remind me to update the Omi firmware"
+    - "Create a task to review Friend documentation"
+    - "Set an alarm for my Omi meeting"
+    - "Add to my list: check Omi updates"
+    - "Schedule a reminder about the Friend app launch"
+
+    KEY RULES: 
+    1. If the question uses personal pronouns (my, I, me, mine, we) asking about stored data/memories/conversations/topics, return False.
+    2. If the question is a command/request starting with action verbs (remind, create, add, set, schedule, make, etc.), return False.
+    3. Only return True if asking about the Omi/Friend app's features, capabilities, or purchasing information.
 
     User's Question:
     {question}
-    '''.replace(
-        '    ', ''
-    ).strip()
-    with_parser = llm_mini.with_structured_output(IsAnOmiQuestion)
-    response: IsAnOmiQuestion = with_parser.invoke(prompt)
+    
+    Is this asking about the Omi/Friend app product itself?
+    '''.replace('    ', '').strip()
+    with_parser = get_llm('chat_extraction').with_structured_output(IsAnOmiQuestion)
+    response = cast(IsAnOmiQuestion, with_parser.invoke(prompt))
     try:
         return response.value
     except ValidationError:
@@ -144,8 +205,8 @@ def retrieve_is_file_question(question: str) -> bool:
     {question}
     '''
 
-    with_parser = llm_mini.with_structured_output(IsFileQuestion)
-    response: IsFileQuestion = with_parser.invoke(prompt)
+    with_parser = get_llm('chat_extraction').with_structured_output(IsFileQuestion)
+    response = cast(IsFileQuestion, with_parser.invoke(prompt))
     try:
         return response.value
     except ValidationError:
@@ -164,14 +225,12 @@ def retrieve_context_dates_by_question(question: str, tz: str) -> List[datetime]
     {question}
     </question>
 
-    '''.replace(
-        '    ', ''
-    ).strip()
+    '''.replace('    ', '').strip()
 
     # print(prompt)
-    # print(llm_mini.invoke(prompt).content)
-    with_parser = llm_mini.with_structured_output(DatesContext)
-    response: DatesContext = with_parser.invoke(prompt)
+    # print(get_llm('chat_extraction').invoke(prompt).content)
+    with_parser = get_llm('chat_extraction').with_structured_output(DatesContext)
+    response = cast(DatesContext, with_parser.invoke(prompt))
     return response.dates_range
 
 
@@ -179,8 +238,13 @@ class SummaryOutput(BaseModel):
     summary: str = Field(description="The extracted content, maximum 500 words.")
 
 
-def chunk_extraction(segments: List[TranscriptSegment], topics: List[str], people: List[Person] = None) -> str:
-    content = TranscriptSegment.segments_as_string(segments, people=people)
+def chunk_extraction(
+    segments: List[TranscriptSegment],
+    topics: List[str],
+    people: Optional[List[Person]] = None,
+    user_name: Optional[str] = None,
+) -> str:
+    content = TranscriptSegment.segments_as_string(segments, people=people, user_name=user_name)
     prompt = f'''
     You are an experienced detective, your task is to extract the key points of the conversation related to the topics you were provided.
     You will be given a conversation transcript of a low quality recording, and a list of topics.
@@ -193,8 +257,8 @@ def chunk_extraction(segments: List[TranscriptSegment], topics: List[str], peopl
 
     Topics: {topics}
     '''
-    with_parser = llm_mini.with_structured_output(SummaryOutput)
-    response: SummaryOutput = with_parser.invoke(prompt)
+    with_parser = get_llm('chat_extraction').with_structured_output(SummaryOutput)
+    response = cast(SummaryOutput, with_parser.invoke(prompt))
     return response.summary
 
 
@@ -213,25 +277,29 @@ def _get_answer_simple_message_prompt(uid: str, messages: List[Message], app: Op
     You are made for {user_name}, {memories_str}
 
     Use what you know about {user_name}, to continue the conversation, feel free to ask questions, share stories, or just say hi.
+
+    If a user asks a question, just answer it. Don't add any extra information. Don't be verbose.
     {plugin_info}
 
     Conversation History:
     {conversation_history}
 
     Answer:
-    """.replace(
-        '    ', ''
-    ).strip()
+    """.replace('    ', '').strip()
 
 
 def answer_simple_message(uid: str, messages: List[Message], plugin: Optional[App] = None) -> str:
     prompt = _get_answer_simple_message_prompt(uid, messages, plugin)
-    return llm_mini.invoke(prompt).content
+    with track_usage(uid, Features.CHAT):
+        return _content_str(get_llm('chat_responses').invoke(prompt))
 
 
-def answer_simple_message_stream(uid: str, messages: List[Message], plugin: Optional[App] = None, callbacks=[]) -> str:
+def answer_simple_message_stream(
+    uid: str, messages: List[Message], plugin: Optional[App] = None, callbacks: List[Any] = []
+) -> str:
     prompt = _get_answer_simple_message_prompt(uid, messages, plugin)
-    return llm_mini_stream.invoke(prompt, {'callbacks': callbacks}).content
+    with track_usage(uid, Features.CHAT):
+        return _content_str(get_llm('chat_responses', streaming=True).invoke(prompt, {'callbacks': callbacks}))
 
 
 def _get_answer_omi_question_prompt(messages: List[Message], context: str) -> str:
@@ -252,19 +320,17 @@ def _get_answer_omi_question_prompt(messages: List[Message], context: str) -> st
     {conversation_history}
 
     Answer:
-    """.replace(
-        '    ', ''
-    ).strip()
+    """.replace('    ', '').strip()
 
 
 def answer_omi_question(messages: List[Message], context: str) -> str:
     prompt = _get_answer_omi_question_prompt(messages, context)
-    return llm_mini.invoke(prompt).content
+    return _content_str(get_llm('chat_extraction').invoke(prompt))
 
 
-def answer_omi_question_stream(messages: List[Message], context: str, callbacks: []) -> str:
+def answer_omi_question_stream(messages: List[Message], context: str, callbacks: List[Any]) -> str:
     prompt = _get_answer_omi_question_prompt(messages, context)
-    return llm_mini_stream.invoke(prompt, {'callbacks': callbacks}).content
+    return _content_str(get_llm('chat_extraction', streaming=True).invoke(prompt, {'callbacks': callbacks}))
 
 
 def _get_qa_rag_prompt(
@@ -276,7 +342,7 @@ def _get_qa_rag_prompt(
     messages: List[Message] = [],
     tz: Optional[str] = "UTC",
 ) -> str:
-    user_name, memories_str = get_prompt_memories(uid)
+    _user_name, memories_str = get_prompt_memories(uid)
     memories_str = '\n'.join(memories_str.split('\n')[1:]).strip()
 
     # Use as template (make sure it varies every time): "If I were you $user_name I would do x, y, z."
@@ -285,7 +351,6 @@ def _get_qa_rag_prompt(
     if plugin:
         plugin_info = f"Your name is: {plugin.name}, and your personality/description is '{plugin.description}'.\nMake sure to reflect your personality in your response.\n"
 
-    # Ref: https://www.reddit.com/r/perplexity_ai/comments/1hi981d
     cited_instruction = """
     - You MUST cite the most relevant <memories> that answer the question. \
       - Only cite in <memories> not <user_facts>, not <previous_messages>.
@@ -294,8 +359,7 @@ def _get_qa_rag_prompt(
       - Avoid citing irrelevant memories.
     """
 
-    return (
-        f"""
+    return f"""
     <assistant_role>
         You are an assistant for question-answering tasks.
     </assistant_role>
@@ -354,12 +418,477 @@ def _get_qa_rag_prompt(
     </question_timezone>
 
     <answer>
-    """.replace(
-            '    ', ''
-        )
-        .replace('\n\n\n', '\n\n')
-        .strip()
+    """.replace('    ', '').replace('\n\n\n', '\n\n').strip()
+
+
+# The agentic system prompt is wrapped in a single Anthropic cache_control breakpoint,
+# so any byte that changes per request invalidates the whole cached prefix. The current
+# datetime is the only such value (microsecond ISO), so it is kept OUT of the system prompt
+# and injected into the user turn instead (see get_current_datetime_block / agentic.py).
+# The system prompt references this placeholder so the datetime instructions still make sense.
+CURRENT_DATETIME_PLACEHOLDER = "(see <current_datetime> in the latest user message)"
+
+
+def get_user_timezone(uid: str) -> str:
+    """Resolve the user's timezone, falling back to UTC when missing/invalid."""
+    tz = notification_db.get_user_time_zone(uid)
+    if tz is None:
+        return "UTC"
+    try:
+        ZoneInfo(tz)
+        return tz
+    except Exception:
+        return "UTC"
+
+
+def get_current_datetime_block(uid: str, tz: Optional[str] = None) -> str:
+    """Build the current-datetime block injected into the user turn.
+
+    Kept out of the cached system prefix so the cached bytes stay stable across requests
+    while the model still receives the live time. Mirrors the timezone resolution used by
+    _get_agentic_qa_prompt. Pass a pre-resolved ``tz`` to avoid a duplicate timezone lookup
+    when the caller already resolved it for the system prompt.
+    """
+    if tz is None:
+        tz = get_user_timezone(uid)
+    try:
+        current_datetime_user = datetime.now(ZoneInfo(tz))
+    except Exception:
+        current_datetime_user = datetime.now(timezone.utc)
+        tz = "UTC"
+    current_datetime_str = current_datetime_user.strftime('%Y-%m-%d %H:%M:%S')
+    current_datetime_iso = current_datetime_user.isoformat()
+    return (
+        "<current_datetime>\n"
+        f"Current date time in {tz}: {current_datetime_str}\n"
+        f"Current date time ISO format: {current_datetime_iso}\n"
+        "</current_datetime>"
     )
+
+
+def _get_agentic_qa_prompt(  # type: ignore[reportUnusedFunction]  # imported by retrieval/agentic.py
+    uid: str,
+    app: Optional[App] = None,
+    messages: Optional[List[Message]] = None,
+    context: Optional[PageContext] = None,
+    tz: Optional[str] = None,
+) -> str:
+    """
+    Build the system prompt for the agentic chat agent.
+
+    Uses LangSmith-controlled prompt template with dynamic variable injection.
+    Falls back to hardcoded prompt if LangSmith is unavailable.
+
+    The current datetime is intentionally NOT embedded here — it changes every request and
+    would invalidate the cache_control prefix. It is injected into the user turn instead
+    (see get_current_datetime_block); the prompt only carries a stable placeholder.
+
+    Args:
+        uid: User ID
+        app: Optional app/plugin for personalized behavior
+        messages: Optional message history for file context
+        context: Optional page context (type, id, title)
+
+    Returns:
+        System prompt string
+    """
+    user_name = get_user_name(uid)
+
+    # Resolve timezone only — the live datetime is injected into the user turn, not here,
+    # so the cached system prefix stays byte-identical across requests. A caller that already
+    # resolved the timezone (for the datetime block) can pass it in to skip a duplicate lookup.
+    if tz is None:
+        tz = get_user_timezone(uid)
+    current_datetime_str = CURRENT_DATETIME_PLACEHOLDER
+    current_datetime_iso = CURRENT_DATETIME_PLACEHOLDER
+    logger.info(f"🌍 _get_agentic_qa_prompt - User timezone: {tz}")
+
+    # Handle persona apps - they override the entire system prompt
+    if app and app.is_a_persona():
+        return app.persona_prompt or app.chat_prompt or ''
+
+    # Plugin-specific instructions for regular apps
+    plugin_info = ""
+    plugin_section = ""
+    if app:
+        plugin_info = f"Your name is: {app.name}, and your personality/description is '{app.description}'.\nMake sure to reflect your personality in your response."
+        plugin_section = f"""<plugin_instructions>
+{plugin_info}
+</plugin_instructions>
+
+"""
+
+    # Add file context if messages contain files
+    file_context_section = ""
+    if messages:
+        message_history_with_files = Message.get_messages_as_string(messages, include_file_info=True)
+        # Check if any files are present
+        if '[Files attached:' in message_history_with_files:
+            file_context_section = f"""
+<conversation_history_with_files>
+Recent conversation (includes file attachment IDs):
+{message_history_with_files}
+When you see [Files attached: X file(s), IDs: ...], you can reference those file IDs in search_files_tool.
+</conversation_history_with_files>
+
+"""
+
+    # Get user's current goals
+    user_goals = goals_db.get_user_goals(uid)
+    goal_section = ""
+    if user_goals:
+        goals_lines: List[str] = []
+        for g in user_goals:
+            g_title = g.get('title', '')
+            g_current = g.get('current_value', 0)
+            g_target = g.get('target_value', 0)
+            goals_lines.append(f'- "{g_title}" (Progress: {g_current}/{g_target})')
+        goals_list = "\n".join(goals_lines)
+        goal_section = f"""
+<user_goals>
+{user_name}'s current goals:
+{goals_list}
+Keep these goals in mind when giving advice or suggestions.
+</user_goals>
+
+"""
+
+    # Add page context if provided
+    context_section = ""
+    if context:
+        # Sanitize title to prevent prompt injection (escape angle brackets and quotes)
+        safe_title = (context.title or "").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+        context_section = f"""<current_context>
+{user_name} is currently viewing: {context.type} - "{safe_title}" (ID: {context.id or 'unknown'})
+Keep this context in mind when answering their question.
+</current_context>
+
+"""
+
+    # Build conditional instruction hints for the template
+    plugin_instruction_hint = "- Regard the <plugin_instructions>" if plugin_info else ""
+    plugin_personality_hint = f"- Reflect {app.name}'s personality" if app else ""
+
+    # Build template variables dict for LangSmith prompt
+    template_variables = {
+        "user_name": user_name,
+        "tz": tz,
+        "current_datetime_str": current_datetime_str,
+        "current_datetime_iso": current_datetime_iso,
+        "goal_section": goal_section,
+        "file_context_section": file_context_section,
+        "context_section": context_section,
+        "plugin_section": plugin_section,
+        "plugin_instruction_hint": plugin_instruction_hint,
+        "plugin_personality_hint": plugin_personality_hint,
+    }
+
+    # Fetch and render the prompt template from LangSmith (with caching + fallback)
+    try:
+        from utils.observability.langsmith_prompts import get_agentic_system_prompt_template, render_prompt
+
+        cached_prompt = get_agentic_system_prompt_template()
+        base_prompt = render_prompt(cached_prompt.template_text, template_variables)
+
+        logger.info(
+            f"📝 Using prompt: {cached_prompt.prompt_name} (commit: {cached_prompt.prompt_commit}, source: {cached_prompt.source})"
+        )
+
+        return base_prompt.strip()
+
+    except Exception as e:
+        logger.error(f"⚠️  Error fetching/rendering LangSmith prompt, using inline fallback: {e}")
+
+    # Inline fallback prompt - used when LangSmith is unavailable
+    #
+    # PROMPT CACHE OPTIMIZATION: OpenAI serializes requests as [tools][system][messages].
+    # Static sections come FIRST so the prefix (tools + static system prompt) stays
+    # byte-identical across users/requests, maximizing prompt-cache hits (90% discount).
+    # All dynamic content ({user_name}, {tz}, datetime, goal, context, plugin) is
+    # pushed to the end of the system prompt.
+
+    base_prompt = f"""<response_style>
+Write like a real human texting - not an AI writing an essay.
+
+Length:
+- Default: 2-8 lines, conversational
+- Complex/detailed questions (plans, analyses, lists, step-by-step instructions): as long as needed — NEVER cut off or truncate, always finish the full answer
+- Reflections/planning: can be longer but NO SUMMARIES of what they said
+- Quick replies: 1-3 lines
+- **"I don't know" responses: 1-2 lines MAX** - just say you don't have it and stop
+
+Format:
+- NO essays summarizing their message
+- NO headers like "What you did:", "How you felt:", "Next steps:"
+- NO "Great reflection!" or corporate praise
+- Just talk normally like you're texting a friend who you respect
+- Feel free to use lowercase, casual language when appropriate
+- NEVER say "in the logs", "captured calls", "recorded conversations" - sound human, not robotic
+</response_style>
+
+<mentor_behavior>
+You're a mentor, not a yes-man. When you see a critical gap between the user's plan and their goal:
+- Call it out directly - don't bury it after paragraphs of summary
+- Only challenge when it matters - not every message needs pushback
+- Be direct - "why not just do X?" rather than "Have you considered the alternative approach of X?"
+- Never summarize what they just said - jump straight to your reaction/advice
+- Give one clear recommendation, not 10 options
+</mentor_behavior>
+
+<notification_controls>
+User can manage notifications via chat. If user asks to enable/disable/change time:
+- Identify notification type (currently: "reflection" / "daily summary")
+- Call manage_daily_summary_tool
+- Confirm in one line
+
+Examples:
+- "disable reflection notifications" → action="disable"
+- "change reflection to 10pm" → action="set_time", hour=22
+- "what time is my daily summary?" → action="get_settings"
+</notification_controls>
+
+<citing_instructions>
+   * Avoid citing irrelevant conversations.
+   * Cite at the end of EACH sentence that contains information from retrieved conversations. If a sentence uses information from multiple conversations, include all relevant citation numbers.
+   * NO SPACE between the last word and the citation.
+   * Use [index] format immediately after the sentence, for example "You discussed optimizing firmware with your teammate yesterday[1][2]. You talked about the hot weather these days[3]."
+</citing_instructions>
+
+<quality_control>
+Before finalizing your response, perform these quality checks:
+- Review your response for accuracy and completeness - ensure you've **fully** answered the user's question — NEVER truncate or end mid-list/mid-explanation
+- Verify all formatting is correct and consistent throughout your response
+- Check that all citations are relevant and properly placed according to the citing rules
+- Ensure the tone matches the instructions (casual, friendly, concise)
+- Confirm you haven't used prohibited phrases like "Here's", "Based on", "According to", etc.
+- Do NOT add a separate "Citations" or "References" section at the end - citations are inline only
+</quality_control>
+
+<task>
+Answer the user's questions accurately and personally, using the tools when needed to gather additional context from their conversation history and memories.
+</task>
+
+<critical_accuracy_rules>
+**NEVER MAKE UP INFORMATION - THIS IS CRITICAL:**
+
+1. **When tools return empty results:**
+   - If a tool returns "No conversations/memories found" or empty results, give a SHORT 1-2 line response saying you don't have that information.
+   - Do NOT generate plausible-sounding details even if they seem helpful.
+   - Do NOT offer to "reconstruct" the memory or ask follow-up questions to help recall it - just say you don't have it and move on.
+   - Do NOT explain possibilities like "maybe it wasn't recorded" or "maybe it was bundled in another convo" - keep it simple.
+
+2. **Questions about people:**
+   - **NEVER fabricate information about a person** (their traits, relationship with the user, past interactions, personality, etc.) unless you found it in retrieved conversations or memories.
+   - For questions like "what should I know about [person]?" or "tell me about [person]?", if tools return no results, just say: "I don't have anything about [person]." - that's it, keep it short.
+   - Do NOT make up details like "they're emotionally tuned-in" or "you trust them" unless explicitly found in retrieved data.
+
+3. **Sound like a human, not a robot:**
+   - NEVER say "in the logs", "in your captured calls", "in your recorded conversations", "in the data"
+   - Instead say things like "I don't remember that", "I don't have anything about that", "nothing comes up for that"
+   - Talk like you're a friend who genuinely doesn't recall something, not a database returning empty results
+
+4. **General rule:**
+   - If you don't know something, say "I don't know" or "I don't have that" in 1-2 lines max - do NOT write paragraphs explaining why.
+   - It's better to give a short honest "I don't have that" than a long explanation about what might have happened.
+</critical_accuracy_rules>
+
+<chart_visualization>
+When the user asks to "show a graph", "chart", "plot", or "visualize" data:
+1. First, fetch the data using the appropriate tool (e.g., get_apple_health_sleep_tool, get_apple_health_steps_tool, get_whoop_sleep_tool)
+2. Then, call create_chart_tool with the extracted data points to render an inline chart
+3. Use "line" chart_type for trends over time, "bar" for comparisons
+4. In your text response, briefly describe key insights from the data
+</chart_visualization>
+
+<conversation_retrieval_strategies>
+To maximize context and find the most relevant conversations, follow these strategies:
+
+1. **Always try to extract datetime filters from the user's question:**
+   - Look for temporal references like "today", "yesterday", "last week", "this morning", "3 hours ago", etc.
+   - When detected, ALWAYS include start_date and end_date parameters to narrow the search
+   - This helps retrieve the most relevant conversations and reduces noise
+
+2. **Fallback strategy when search_conversations_tool returns no results:**
+   - If you used search_conversations_tool with a query and filters (topics, people, entities) and got no results
+   - Try again with ONLY the datetime filter (remove query, topics, people, entities)
+   - This helps find conversations from that time period even if the specific search terms don't match
+   - Example: If searching for "machine learning discussions yesterday" returns nothing, try searching conversations from yesterday without the query
+
+3. **For general activity questions (no specific topic), retrieve the last 24 hours:**
+   - When user asks broad questions like "what did I do today?", "summarize my day", "what have I been up to?"
+   - Use get_conversations_tool with start_date = 24 hours ago and end_date = now
+   - This provides rich context about their recent activities
+
+4. **Balance specificity with breadth:**
+   - Start with specific filters (datetime + query + topics/people) for targeted questions
+   - If no results, progressively remove filters (keep datetime, drop query/topics/people)
+   - As a last resort, expand the time window (e.g., from "today" to "last 3 days")
+
+5. **When to use each retrieval tool:**
+   - Use **search_conversations_tool** for:
+     * Semantic/thematic searches, finding conversations by meaning or topics
+     * **CRITICAL: Questions about SPECIFIC EVENTS or INCIDENTS** that happened to the user
+     * Finding conversations about specific people, places, or things
+     * Any question asking "when did X happen?" or "what happened when Y?"
+   - Use **get_conversations_tool** for: Time-based queries without specific search criteria, general activities, chronological views
+   - Use **get_memories_tool** for: ONLY static facts/preferences about the user (name, age, preferences, habits, goals, relationships) - NOT for specific events or incidents
+   - **IMPORTANT DISTINCTION**:
+     * "What's my favorite food?" → get_memories_tool (preference/fact)
+     * "When did I get food poisoning?" → search_conversations_tool (EVENT)
+     * "Do I like dogs?" → get_memories_tool (preference)
+     * "When did a dog bite me?" → search_conversations_tool (EVENT)
+   - Always prefer narrower time windows first (hours > day > week > month) for better relevance
+</conversation_retrieval_strategies>
+
+<assistant_role>
+You are Omi, an AI assistant & mentor for {user_name}. You are a smart friend who gives honest and concise feedback and responses to user's questions in the most personalized way possible as you know everything about the user.
+</assistant_role>
+
+<user_context>
+Name: {user_name}
+Timezone: {tz}
+Current date time: {current_datetime_str}
+Current date time ISO: {current_datetime_iso}
+</user_context>
+{goal_section}{file_context_section}{context_section}
+<tool_datetime_rules>
+**DateTime Formatting Rules for Tool Calls:**
+When using tools with date/time parameters (start_date, end_date), you MUST follow these rules:
+
+**CRITICAL: All datetime calculations must be done in {user_name}'s timezone ({tz}), then formatted as ISO with timezone offset.**
+
+When the user asks about specific dates/times, they are ALWAYS referring to dates/times in their timezone ({tz}), not UTC.
+
+1. **Always use ISO format with timezone:**
+   - Format: YYYY-MM-DDTHH:MM:SS+HH:MM (e.g., "2024-01-19T15:00:00-08:00" for PST)
+   - NEVER use datetime without timezone (e.g., "2024-01-19T07:15:00" is WRONG)
+   - The timezone offset must match {user_name}'s timezone ({tz})
+   - Use the current time from the <current_datetime> block in the latest user message as your reference
+
+2. **For "X hours ago" or "X minutes ago" queries:**
+   - Work in {user_name}'s timezone: {tz}
+   - Identify the specific hour that was X hours/minutes ago
+   - start_date: Beginning of that hour (HH:00:00)
+   - end_date: End of that hour (HH:59:59)
+   - Example (illustrative): if the current time were "2024-01-19T17:23:45-08:00" and the user asks "3 hours ago"
+     * Calculate: 17:23:45 minus 3 hours
+     * Get the hour boundary: result is 2024-01-19T14:23:45-08:00, so use hour 14
+     * start_date = "2024-01-19T14:00:00-08:00"
+     * end_date = "2024-01-19T14:59:59-08:00"
+   - Always use the actual current time from the <current_datetime> block, formatted with the timezone offset for {tz}
+
+3. **For "today" queries:**
+   - start_date: Start of today in {tz} (00:00:00)
+   - end_date: End of today in {tz} (23:59:59)
+   - Example in PST: start_date="2024-01-19T00:00:00-08:00", end_date="2024-01-19T23:59:59-08:00"
+
+4. **For "yesterday" queries:**
+   - start_date: Start of yesterday in {tz} (00:00:00)
+   - end_date: End of yesterday in {tz} (23:59:59)
+   - Example in PST: start_date="2024-01-18T00:00:00-08:00", end_date="2024-01-18T23:59:59-08:00"
+
+5. **For point-in-time queries with hour precision:**
+   - Use the boundaries of that specific hour in {tz}
+   - Example: "what happened at 3 PM today?" in PST → start_date="2024-01-19T15:00:00-08:00", end_date="2024-01-19T15:59:59-08:00"
+
+**Remember: ALL times must be in ISO format with the timezone offset for {tz}. Never use UTC unless {user_name}'s timezone is UTC.**
+</tool_datetime_rules>
+
+<instructions>
+- Be casual, concise, and direct—text like a friend.
+- Give specific feedback/advice; never generic.
+- Keep it short—use fewer words, bullet points when possible.
+- Always answer the question directly; no extra info, no fluff.
+- Never say robotic phrases like "based on available memories", "according to the tools", "in the logs", "in your captured calls", "in your recorded conversations" - instead say things like "from what I remember", "last time you mentioned this", etc.
+- **CRITICAL**: Follow <critical_accuracy_rules> - if you don't have info, give a SHORT 1-2 line response and stop. No long explanations, no offers to reconstruct, no follow-up questions.
+- If a tool returns "No conversations/memories found," say honestly that {user_name} doesn’t have that data yet, in a friendly way.
+- Use get_memories_tool for questions about {user_name}'s static facts/preferences (name, age, habits, goals, relationships). Do NOT use it for questions about specific events/incidents - use search_conversations_tool instead for those.
+- Use correct date/time format (see <tool_datetime_rules>) when calling tools.
+- Cite conversations when using them (see <citing_instructions>).
+- Show times/dates in {user_name}'s timezone ({tz}), in a natural, friendly way (e.g., "3:45 PM, Tuesday, Oct 16th").
+- If you don’t know, say so honestly.
+- Only suggest truly relevant, context-specific follow-up questions (no generic ones).
+- When you learn a new preference, habit, or personal detail about {user_name} during conversation, save it using save_user_preference_tool so you remember it next time. Don't ask — just save silently. Don't save things you already know from existing memories.
+{plugin_instruction_hint}
+- Follow <quality_control> rules.
+{plugin_personality_hint}
+</instructions>
+
+{plugin_section}
+Remember: Use tools strategically to provide the best possible answers. For questions about specific EVENTS or INCIDENTS (e.g., "when did X happen?", "what happened at Y?"), use search_conversations_tool to find relevant conversations. For questions about static FACTS/PREFERENCES (e.g., "what's my favorite X?", "do I like Y?"), use get_memories_tool. Your goal is to help {user_name} in the most personalized and helpful way possible.
+"""
+
+    return base_prompt.strip()
+
+
+def _get_agentic_qa_prompt_fallback(variables: dict[str, Any]) -> str:  # type: ignore[reportUnusedFunction]  # offline/CI fallback when LangSmith prompt fetch fails
+    """
+    Fallback prompt template rendered with variables.
+    Used when LangSmith prompt fetching fails.
+    """
+    user_name = variables.get("user_name", "User")
+    tz = variables.get("tz", "UTC")
+    current_datetime_str = variables.get("current_datetime_str", "")
+    current_datetime_iso = variables.get("current_datetime_iso", "")
+    goal_section = variables.get("goal_section", "")
+    file_context_section = variables.get("file_context_section", "")
+    context_section = variables.get("context_section", "")
+    plugin_section = variables.get("plugin_section", "")
+    plugin_instruction_hint = variables.get("plugin_instruction_hint", "")
+    plugin_personality_hint = variables.get("plugin_personality_hint", "")
+
+    return f"""<assistant_role>
+You are Omi, an AI assistant & mentor for {user_name}. You are a smart friend who gives honest and concise feedback and responses to user's questions in the most personalized way possible as you know everything about the user.
+</assistant_role>
+{goal_section}{file_context_section}{context_section}
+
+<current_datetime>
+Current date time in {user_name}'s timezone ({tz}): {current_datetime_str}
+Current date time ISO format: {current_datetime_iso}
+</current_datetime>
+
+<mentor_behavior>
+You're a mentor, not a yes-man. When you see a critical gap between {user_name}'s plan and their goal:
+- Call it out directly - don't bury it after paragraphs of summary
+- Only challenge when it matters - not every message needs pushback
+- Be direct - "why not just do X?" rather than "Have you considered the alternative approach of X?"
+- Never summarize what they just said - jump straight to your reaction/advice
+- Give one clear recommendation, not 10 options
+</mentor_behavior>
+
+<response_style>
+Write like a real human texting - not an AI writing an essay.
+Default: 2-8 lines. Quick replies: 1-3 lines. "I don't know" responses: 1-2 lines MAX.
+NO essays summarizing their message. NO headers. Just talk like you're texting a friend.
+</response_style>
+
+<tool_instructions>
+DateTime Formatting: Use ISO format with timezone (YYYY-MM-DDTHH:MM:SS+HH:MM).
+All datetime calculations in {user_name}'s timezone ({tz}), current time: {current_datetime_iso}
+Use search_conversations_tool for events, get_memories_tool for static facts/preferences.
+When user asks to "show a graph", "chart", or "visualize" data: first fetch data with the appropriate tool, then call create_chart_tool with the data points.
+</tool_instructions>
+
+<citing_instructions>
+Cite at end of EACH sentence with info from conversations: "text[1]". NO space before citation.
+</citing_instructions>
+
+<critical_accuracy_rules>
+NEVER make up information. If tools return empty, give SHORT 1-2 line response.
+Sound human: "I don't have that" not "no data in logs".
+</critical_accuracy_rules>
+
+<instructions>
+- Be casual, concise, direct—text like a friend
+- Give specific feedback; never generic
+- If you don't know, say so in 1-2 lines max
+{plugin_instruction_hint}
+{plugin_personality_hint}
+</instructions>
+
+{plugin_section}
+Remember: Use tools strategically. Your goal is to help {user_name} in the most personalized way possible.
+"""
 
 
 def qa_rag(
@@ -373,7 +902,8 @@ def qa_rag(
 ) -> str:
     prompt = _get_qa_rag_prompt(uid, question, context, plugin, cited, messages, tz)
     # print('qa_rag prompt', prompt)
-    return llm_medium.invoke(prompt).content
+    with track_usage(uid, Features.CHAT):
+        return _content_str(get_llm('chat_responses').invoke(prompt))
 
 
 def qa_rag_stream(
@@ -384,11 +914,12 @@ def qa_rag_stream(
     cited: Optional[bool] = False,
     messages: List[Message] = [],
     tz: Optional[str] = "UTC",
-    callbacks=[],
+    callbacks: List[Any] = [],
 ) -> str:
     prompt = _get_qa_rag_prompt(uid, question, context, plugin, cited, messages, tz)
     # print('qa_rag prompt', prompt)
-    return llm_medium_stream.invoke(prompt, {'callbacks': callbacks}).content
+    with track_usage(uid, Features.CHAT):
+        return _content_str(get_llm('chat_responses', streaming=True).invoke(prompt, {'callbacks': callbacks}))
 
 
 # **************************************************
@@ -396,14 +927,18 @@ def qa_rag_stream(
 # **************************************************
 
 
-def retrieve_memory_context_params(uid: str, memory: Conversation) -> List[str]:
-    person_ids = memory.get_person_ids()
+def retrieve_memory_context_params(
+    uid: str, transcript_segments: List[TranscriptSegment], person_ids: List[str]
+) -> List[str]:
     people = []
     if person_ids:
         people_data = users_db.get_people_by_ids(uid, list(set(person_ids)))
         people = [Person(**p) for p in people_data]
 
-    transcript = memory.get_transcript(False, people=people)
+    user_name = get_user_name(uid, use_default=False)
+    transcript = TranscriptSegment.segments_as_string(
+        transcript_segments, include_timestamps=False, user_name=user_name, people=people
+    )
     if len(transcript) == 0:
         return []
 
@@ -415,29 +950,31 @@ def retrieve_memory_context_params(uid: str, memory: Conversation) -> List[str]:
 
     Conversation:
     {transcript}
-    '''.replace(
-        '    ', ''
-    ).strip()
+    '''.replace('    ', '').strip()
 
     try:
-        with_parser = llm_mini.with_structured_output(TopicsContext)
-        response: TopicsContext = with_parser.invoke(prompt)
-        return response.topics
+        with track_usage(uid, Features.CHAT):
+            with_parser = get_llm('chat_extraction').with_structured_output(TopicsContext)
+            response = cast(TopicsContext, with_parser.invoke(prompt))
+        return [e.value if hasattr(e, 'value') else str(e) for e in response.topics]
     except Exception as e:
-        print(f'Error determining memory discard: {e}')
+        logger.error(f'Error determining memory discard: {e}')
         return []
 
 
-def obtain_emotional_message(uid: str, memory: Conversation, context: str, emotion: str) -> str:
+def obtain_emotional_message(
+    uid: str, transcript_segments: List[TranscriptSegment], person_ids: List[str], context: str, emotion: str
+) -> str:
     user_name, memories_str = get_prompt_memories(uid)
 
-    person_ids = memory.get_person_ids()
     people = []
     if person_ids:
         people_data = users_db.get_people_by_ids(uid, list(set(person_ids)))
         people = [Person(**p) for p in people_data]
 
-    transcript = memory.get_transcript(False, people=people)
+    transcript = TranscriptSegment.segments_as_string(
+        transcript_segments, include_timestamps=False, user_name=user_name, people=people
+    )
     prompt = f"""
     You are a thoughtful and encouraging Friend.
     Your best friend is {user_name}, {memories_str}
@@ -459,10 +996,9 @@ def obtain_emotional_message(uid: str, memory: Conversation, context: str, emoti
     ```
     {context}
     ```
-    """.replace(
-        '    ', ''
-    ).strip()
-    return llm_mini.invoke(prompt).content
+    """.replace('    ', '').strip()
+    with track_usage(uid, Features.CHAT):
+        return _content_str(get_llm('chat_extraction').invoke(prompt))
 
 
 # **********************************************
@@ -507,7 +1043,7 @@ class OutputQuestion(BaseModel):
 
 def extract_question_from_conversation(messages: List[Message]) -> str:
     # user last messages
-    print("extract_question_from_conversation")
+    logger.info("extract_question_from_conversation")
     user_message_idx = len(messages)
     for i in range(len(messages) - 1, -1, -1):
         if messages[i].sender == MessageSender.ai:
@@ -532,9 +1068,16 @@ def extract_question_from_conversation(messages: List[Message]) -> str:
     If the <user_last_messages> contain a complete question, maintain the original version as accurately as possible. \
     Avoid adding unnecessary words.
 
+    **IMPORTANT**: If the user gives a command or imperative statement (like "remind me to...", "add task to...", "create action item..."), \
+    convert it to a question format by adding "Can you" or "Could you" at the beginning. \
+    Examples:
+    - "remind me to buy milk tomorrow" -> "Can you remind me to buy milk tomorrow"
+    - "add task to finish report" -> "Can you add task to finish report"
+    - "create action item for meeting" -> "Can you create action item for meeting"
+
     You MUST keep the original <date_in_term>
 
-    Output a WH-question, that is, a question that starts with a WH-word, like "What", "When", "Where", "Who", "Why", "How".
+    Output a WH-question or a question that starts with "Can you" or "Could you" for commands.
 
     Example 1:
     <user_last_messages>
@@ -558,7 +1101,7 @@ def extract_question_from_conversation(messages: List[Message]) -> str:
     </user_last_messages>
 
     <previous_messages>
-    {Message.get_messages_as_xml(messages)}
+    {Message.get_messages_as_xml(messages[:user_message_idx])}
     </previous_messages>
 
     <date_in_term>
@@ -569,19 +1112,23 @@ def extract_question_from_conversation(messages: List[Message]) -> str:
     - this day
     - etc.
     </date_in_term>
-    '''.replace(
-        '    ', ''
-    ).strip()
+    '''.replace('    ', '').strip()
     # print(prompt)
-    question = llm_mini.with_structured_output(OutputQuestion).invoke(prompt).question
+    question = cast(
+        OutputQuestion, get_llm('chat_extraction').with_structured_output(OutputQuestion).invoke(prompt)
+    ).question
     # print(question)
     return question
 
 
 def retrieve_metadata_fields_from_transcript(
-    uid: str, created_at: datetime, transcript_segment: List[dict], tz: str, photos: List[ConversationPhoto] = None
-) -> ExtractedInformation:
-    context_parts = []
+    uid: str,
+    created_at: datetime,
+    transcript_segment: List[dict[str, Any]],
+    tz: str,
+    photos: Optional[List[ConversationPhoto]] = None,
+) -> dict[str, Any]:
+    context_parts: List[str] = []
     if transcript_segment:
         transcript = ''
         for segment in transcript_segment:
@@ -607,7 +1154,7 @@ def retrieve_metadata_fields_from_transcript(
 
     Make sure as a first step, you infer and fix any raw transcript errors and then proceed to extract the information from the entire content.
 
-    For context when extracting dates, today is {created_at.astimezone(timezone.utc).strftime('%Y-%m-%d')} in UTC. {tz} is the user's timezone, convert it to UTC and respond in UTC.
+    For context when extracting dates, today is {created_at.astimezone(ZoneInfo(tz)).strftime('%Y-%m-%d')} in {tz} (user's local timezone). {tz} is the user's timezone, respond in user local timezone.
     If one says "today", it means the current day.
     If one says "tomorrow", it means the next day after today.
     If one says "yesterday", it means the day before today.
@@ -618,40 +1165,23 @@ def retrieve_metadata_fields_from_transcript(
     ```
     {full_context}
     ```
-    '''.replace(
-        '    ', ''
-    )
+    '''.replace('    ', '')
     try:
-        result: ExtractedInformation = llm_mini.with_structured_output(ExtractedInformation).invoke(prompt)
+        with track_usage(uid, Features.CONVERSATION_PROCESSING):
+            result = cast(
+                ExtractedInformation,
+                get_llm('chat_extraction').with_structured_output(ExtractedInformation).invoke(prompt),
+            )
     except Exception as e:
-        print('e', e)
+        logger.error(f'e {e}')
         return {'people': [], 'topics': [], 'entities': [], 'dates': []}
 
-    def normalize_filter(value: str) -> str:
-        # Convert to lowercase and strip whitespace
-        value = value.lower().strip()
-
-        # Remove special characters and extra spaces
-        value = re.sub(r'[^\w\s-]', '', value)
-        value = re.sub(r'\s+', ' ', value)
-
-        # Remove common filler words
-        filler_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to'}
-        value = ' '.join(word for word in value.split() if word not in filler_words)
-
-        # Standardize common variations
-        value = value.replace('artificial intelligence', 'ai')
-        value = value.replace('machine learning', 'ml')
-        value = value.replace('natural language processing', 'nlp')
-
-        return value.strip()
-
-    metadata = {
-        'people': [normalize_filter(p) for p in result.people],
-        'topics': [normalize_filter(t) for t in result.topics],
-        'entities': [normalize_filter(e) for e in result.topics],
-        'dates': [],
-    }
+    metadata = ConversationMetadata(
+        people=[normalize_filter(p) for p in result.people],
+        topics=[normalize_filter(t) for t in result.topics],
+        entities=[normalize_filter(e) for e in result.entities],
+        dates=[],
+    ).to_vector_metadata()
     # 'dates': [date.strftime('%Y-%m-%d') for date in result.dates],
     for date in result.dates:
         try:
@@ -660,7 +1190,7 @@ def retrieve_metadata_fields_from_transcript(
             #    continue
             metadata['dates'].append(date.strftime('%Y-%m-%d'))
         except Exception as e:
-            print(f'Error parsing date: {e}')
+            logger.error(f'Error parsing date: {e}')
 
     for p in metadata['people']:
         add_filter_category_item(uid, 'people', p)
@@ -675,8 +1205,8 @@ def retrieve_metadata_fields_from_transcript(
 
 
 def retrieve_metadata_from_message(
-    uid: str, created_at: datetime, message_text: str, tz: str, source_spec: str = None
-) -> ExtractedInformation:
+    uid: str, created_at: datetime, message_text: str, tz: str, source_spec: Optional[str] = None
+) -> dict[str, Any]:
     """Extract metadata from messaging app content"""
     source_context = f"from {source_spec}" if source_spec else "from a messaging application"
 
@@ -691,8 +1221,8 @@ def retrieve_metadata_from_message(
     3. Organizations, products, locations, or other entities mentioned
     4. Any dates or time references
 
-    For context when extracting dates, today is {created_at.astimezone(timezone.utc).strftime('%Y-%m-%d')} in UTC. 
-    {tz} is the user's timezone, convert it to UTC and respond in UTC.
+    For context when extracting dates, today is {created_at.astimezone(ZoneInfo(tz)).strftime('%Y-%m-%d')} in {tz} (user's local timezone). 
+    {tz} is the user's timezone, respond in user local timezone.
     If the message mentions "today", it means the current day.
     If the message mentions "tomorrow", it means the next day after today.
     If the message mentions "yesterday", it means the day before today.
@@ -703,16 +1233,14 @@ def retrieve_metadata_from_message(
     ```
     {message_text}
     ```
-    '''.replace(
-        '    ', ''
-    )
+    '''.replace('    ', '')
 
     return _process_extracted_metadata(uid, prompt)
 
 
 def retrieve_metadata_from_text(
-    uid: str, created_at: datetime, text: str, tz: str, source_spec: str = None
-) -> ExtractedInformation:
+    uid: str, created_at: datetime, text: str, tz: str, source_spec: Optional[str] = None
+) -> dict[str, Any]:
     """Extract metadata from generic text content"""
     source_context = f"from {source_spec}" if source_spec else "from a text document"
 
@@ -727,8 +1255,8 @@ def retrieve_metadata_from_text(
     3. Organizations, products, locations, or other entities mentioned
     4. Any dates or time references
 
-    For context when extracting dates, today is {created_at.astimezone(timezone.utc).strftime('%Y-%m-%d')} in UTC. 
-    {tz} is the user's timezone, convert it to UTC and respond in UTC.
+    For context when extracting dates, today is {created_at.astimezone(ZoneInfo(tz)).strftime('%Y-%m-%d')} in {tz} (user's local timezone). 
+    {tz} is the user's timezone, respond in user local timezone.
     If the text mentions "today", it means the current day.
     If the text mentions "tomorrow", it means the next day after today.
     If the text mentions "yesterday", it means the day before today.
@@ -739,46 +1267,29 @@ def retrieve_metadata_from_text(
     ```
     {text}
     ```
-    '''.replace(
-        '    ', ''
-    )
+    '''.replace('    ', '')
 
     return _process_extracted_metadata(uid, prompt)
 
 
-def _process_extracted_metadata(uid: str, prompt: str) -> dict:
+def _process_extracted_metadata(uid: str, prompt: str) -> dict[str, Any]:
     """Process the extracted metadata from any source"""
     try:
-        result: ExtractedInformation = llm_mini.with_structured_output(ExtractedInformation).invoke(prompt)
+        with track_usage(uid, Features.CONVERSATION_PROCESSING):
+            result = cast(
+                ExtractedInformation,
+                get_llm('chat_extraction').with_structured_output(ExtractedInformation).invoke(prompt),
+            )
     except Exception as e:
-        print(f'Error extracting metadata: {e}')
+        logger.error(f'Error extracting metadata: {e}')
         return {'people': [], 'topics': [], 'entities': [], 'dates': []}
 
-    def normalize_filter(value: str) -> str:
-        # Convert to lowercase and strip whitespace
-        value = value.lower().strip()
-
-        # Remove special characters and extra spaces
-        value = re.sub(r'[^\w\s-]', '', value)
-        value = re.sub(r'\s+', ' ', value)
-
-        # Remove common filler words
-        filler_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to'}
-        value = ' '.join(word for word in value.split() if word not in filler_words)
-
-        # Standardize common variations
-        value = value.replace('artificial intelligence', 'ai')
-        value = value.replace('machine learning', 'ml')
-        value = value.replace('natural language processing', 'nlp')
-
-        return value.strip()
-
-    metadata = {
-        'people': [normalize_filter(p) for p in result.people],
-        'topics': [normalize_filter(t) for t in result.topics],
-        'entities': [normalize_filter(e) for e in result.entities],
-        'dates': [],
-    }
+    metadata = ConversationMetadata(
+        people=[normalize_filter(p) for p in result.people],
+        topics=[normalize_filter(t) for t in result.topics],
+        entities=[normalize_filter(e) for e in result.entities],
+        dates=[],
+    ).to_vector_metadata()
 
     for date in result.dates:
         try:
@@ -787,7 +1298,7 @@ def _process_extracted_metadata(uid: str, prompt: str) -> dict:
                 continue
             metadata['dates'].append(date.strftime('%Y-%m-%d'))
         except Exception as e:
-            print(f'Error parsing date: {e}')
+            logger.error(f'Error parsing date: {e}')
 
     for p in metadata['people']:
         add_filter_category_item(uid, 'people', p)
@@ -801,7 +1312,7 @@ def _process_extracted_metadata(uid: str, prompt: str) -> dict:
     return metadata
 
 
-def select_structured_filters(question: str, filters_available: dict) -> dict:
+def select_structured_filters(question: str, filters_available: dict[str, Any]) -> dict[str, Any]:
     prompt = f'''
     Based on a question asked by the user to an AI, the AI needs to search for the user information related to topics, entities, people, and dates that will help it answering.
     Your task is to identify the correct fields that can be related to the question and can help answering.
@@ -814,18 +1325,16 @@ def select_structured_filters(question: str, filters_available: dict) -> dict:
     ```
 
     Question: {question}
-    '''.replace(
-        '    ', ''
-    ).strip()
+    '''.replace('    ', '').strip()
     # print(prompt)
-    with_parser = llm_mini.with_structured_output(FiltersToUse)
+    with_parser = get_llm('chat_extraction').with_structured_output(FiltersToUse)
     try:
-        response: FiltersToUse = with_parser.invoke(prompt)
+        response = cast(FiltersToUse, with_parser.invoke(prompt))
         # print('select_structured_filters:', response.dict())
         response.topics = [t for t in response.topics if t in filters_available['topics']]
         response.people = [p for p in response.people if p in filters_available['people']]
         response.entities = [e for e in response.entities if e in filters_available['entities']]
-        return response.dict()
+        return response.model_dump()
     except ValidationError:
         return {}
 
@@ -862,12 +1371,13 @@ def extract_question_from_transcript(uid: str, segments: List[TranscriptSegment]
 
     Conversation:
     ```
-    {TranscriptSegment.segments_as_string(segments, people=people)}
+    {TranscriptSegment.segments_as_string(segments, people=people, user_name=user_name)}
     ```
-    '''.replace(
-        '    ', ''
-    ).strip()
-    return llm_mini.with_structured_output(OutputQuestion).invoke(prompt).question
+    '''.replace('    ', '').strip()
+    with track_usage(uid, Features.REALTIME_INTEGRATIONS):
+        return cast(
+            OutputQuestion, get_llm('chat_extraction').with_structured_output(OutputQuestion).invoke(prompt)
+        ).question
 
 
 class OutputMessage(BaseModel):
@@ -883,7 +1393,7 @@ def provide_advice_message(uid: str, segments: List[TranscriptSegment], context:
         people_data = users_db.get_people_by_ids(uid, list(set(person_ids)))
         people = [Person(**p) for p in people_data]
 
-    transcript = TranscriptSegment.segments_as_string(segments, people=people)
+    transcript = TranscriptSegment.segments_as_string(segments, people=people, user_name=user_name)
     # TODO: tweak with different type of requests, like this, or roast, or praise or emotional, etc.
 
     prompt = f"""
@@ -915,7 +1425,8 @@ def provide_advice_message(uid: str, segments: List[TranscriptSegment], context:
     ```
     {context}
     ```
-    """.replace(
-        '    ', ''
-    ).strip()
-    return llm_mini.with_structured_output(OutputMessage).invoke(prompt).message
+    """.replace('    ', '').strip()
+    with track_usage(uid, Features.REALTIME_INTEGRATIONS):
+        return cast(
+            OutputMessage, get_llm('chat_extraction').with_structured_output(OutputMessage).invoke(prompt)
+        ).message

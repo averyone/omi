@@ -24,6 +24,16 @@ abstract class MessageEvent {
         return PhotoDescribedEvent.fromJson(json);
       case 'speaker_label_suggestion':
         return SpeakerLabelSuggestionEvent.fromJson(json);
+      case 'onboarding_question':
+        return OnboardingQuestionEvent.fromJson(json);
+      case 'question_answered':
+        return OnboardingQuestionAnsweredEvent.fromJson(json);
+      case 'onboarding_complete':
+        return OnboardingCompleteEvent.fromJson(json);
+      case 'freemium_threshold_reached':
+        return FreemiumThresholdReachedEvent.fromJson(json);
+      case 'segments_deleted':
+        return SegmentsDeletedEvent.fromJson(json);
       default:
         // Return a generic event or throw an error if the type is unknown
         return UnknownEvent(eventType: json['type'] ?? 'unknown');
@@ -38,13 +48,28 @@ class UnknownEvent extends MessageEvent {
 class MessageServiceStatusEvent extends MessageEvent {
   final String status;
   final String? statusText;
+  final String? outcome;
+  final String? provider;
+  final bool? retryable;
+  final String? reason;
 
-  MessageServiceStatusEvent({required this.status, this.statusText}) : super(eventType: 'service_status');
+  MessageServiceStatusEvent({
+    required this.status,
+    this.statusText,
+    this.outcome,
+    this.provider,
+    this.retryable,
+    this.reason,
+  }) : super(eventType: 'service_status');
 
   factory MessageServiceStatusEvent.fromJson(Map<String, dynamic> json) {
     return MessageServiceStatusEvent(
       status: json['status'],
-      statusText: json['status_text'],
+      statusText: json['status_text'] as String?,
+      outcome: json['outcome'] as String?,
+      provider: json['provider'] as String?,
+      retryable: json['retryable'] as bool?,
+      reason: json['reason'] as String?,
     );
   }
 }
@@ -55,9 +80,7 @@ class ConversationProcessingStartedEvent extends MessageEvent {
   ConversationProcessingStartedEvent({required this.memory}) : super(eventType: 'memory_processing_started');
 
   factory ConversationProcessingStartedEvent.fromJson(Map<String, dynamic> json) {
-    return ConversationProcessingStartedEvent(
-      memory: ServerConversation.fromJson(json['memory']),
-    );
+    return ConversationProcessingStartedEvent(memory: ServerConversation.fromJson(json['memory']));
   }
 }
 
@@ -68,10 +91,7 @@ class ConversationEvent extends MessageEvent {
   ConversationEvent({required this.memory, required this.messages}) : super(eventType: 'memory_created');
 
   factory ConversationEvent.fromJson(Map<String, dynamic> json) {
-    return ConversationEvent(
-      memory: ServerConversation.fromJson(json['memory']),
-      messages: json['messages'] ?? [],
-    );
+    return ConversationEvent(memory: ServerConversation.fromJson(json['memory']), messages: json['messages'] ?? []);
   }
 }
 
@@ -81,9 +101,7 @@ class LastConversationEvent extends MessageEvent {
   LastConversationEvent({required this.memoryId}) : super(eventType: 'last_memory');
 
   factory LastConversationEvent.fromJson(Map<String, dynamic> json) {
-    return LastConversationEvent(
-      memoryId: json['memory_id'],
-    );
+    return LastConversationEvent(memoryId: json['memory_id']);
   }
 }
 
@@ -106,10 +124,7 @@ class PhotoProcessingEvent extends MessageEvent {
   PhotoProcessingEvent({required this.tempId, required this.photoId}) : super(eventType: 'photo_processing');
 
   factory PhotoProcessingEvent.fromJson(Map<String, dynamic> json) {
-    return PhotoProcessingEvent(
-      tempId: json['temp_id'],
-      photoId: json['photo_id'],
-    );
+    return PhotoProcessingEvent(tempId: json['temp_id'], photoId: json['photo_id']);
   }
 }
 
@@ -118,11 +133,8 @@ class PhotoDescribedEvent extends MessageEvent {
   final String description;
   final bool discarded;
 
-  PhotoDescribedEvent({
-    required this.photoId,
-    required this.description,
-    this.discarded = false,
-  }) : super(eventType: 'photo_described');
+  PhotoDescribedEvent({required this.photoId, required this.description, this.discarded = false})
+      : super(eventType: 'photo_described');
 
   factory PhotoDescribedEvent.fromJson(Map<String, dynamic> json) {
     return PhotoDescribedEvent(
@@ -156,11 +168,103 @@ class SpeakerLabelSuggestionEvent extends MessageEvent {
   }
 
   static SpeakerLabelSuggestionEvent empty() {
-    return SpeakerLabelSuggestionEvent(
-      speakerId: -1,
-      personId: '',
-      personName: '',
-      segmentId: '',
+    return SpeakerLabelSuggestionEvent(speakerId: -1, personId: '', personName: '', segmentId: '');
+  }
+}
+
+class OnboardingQuestionEvent extends MessageEvent {
+  final String question;
+  final int questionIndex;
+  final int totalQuestions;
+
+  OnboardingQuestionEvent({required this.question, required this.questionIndex, required this.totalQuestions})
+      : super(eventType: 'onboarding_question');
+
+  factory OnboardingQuestionEvent.fromJson(Map<String, dynamic> json) {
+    return OnboardingQuestionEvent(
+      question: json['question'] ?? '',
+      questionIndex: json['question_index'] ?? 0,
+      totalQuestions: json['total_questions'] ?? 0,
     );
+  }
+}
+
+class OnboardingQuestionAnsweredEvent extends MessageEvent {
+  final int questionIndex;
+  final bool answered;
+
+  OnboardingQuestionAnsweredEvent({required this.questionIndex, required this.answered})
+      : super(eventType: 'question_answered');
+
+  factory OnboardingQuestionAnsweredEvent.fromJson(Map<String, dynamic> json) {
+    return OnboardingQuestionAnsweredEvent(
+      questionIndex: json['question_index'] ?? 0,
+      answered: json['answered'] ?? false,
+    );
+  }
+}
+
+class OnboardingCompleteEvent extends MessageEvent {
+  final String? conversationId;
+  final int memoriesCreated;
+  final String? error;
+
+  OnboardingCompleteEvent({this.conversationId, this.memoriesCreated = 0, this.error})
+      : super(eventType: 'onboarding_complete');
+
+  factory OnboardingCompleteEvent.fromJson(Map<String, dynamic> json) {
+    return OnboardingCompleteEvent(
+      conversationId: json['conversation_id'],
+      memoriesCreated: json['memories_created'] ?? 0,
+      error: json['error'],
+    );
+  }
+}
+
+/// Freemium action types sent by backend
+enum FreemiumAction {
+  /// User needs to setup on-device transcription to continue after credits run out
+  setupOnDeviceStt,
+
+  /// No action required - backend handles fallback automatically (future use)
+  none;
+
+  static FreemiumAction fromString(String? value) {
+    switch (value) {
+      case 'setup_on_device_stt':
+        return FreemiumAction.setupOnDeviceStt;
+      default:
+        return FreemiumAction.none;
+    }
+  }
+}
+
+/// Freemium: Sent when user's credits are approaching the limit (e.g., 3 minutes remaining)
+/// Includes action type to tell the app what the user needs to do (if anything)
+class FreemiumThresholdReachedEvent extends MessageEvent {
+  final int remainingSeconds;
+  final FreemiumAction action;
+
+  FreemiumThresholdReachedEvent({required this.remainingSeconds, required this.action})
+      : super(eventType: 'freemium_threshold_reached');
+
+  /// Whether user action is required
+  bool get requiresUserAction => action == FreemiumAction.setupOnDeviceStt;
+
+  factory FreemiumThresholdReachedEvent.fromJson(Map<String, dynamic> json) {
+    return FreemiumThresholdReachedEvent(
+      remainingSeconds: json['remaining_seconds'] ?? 0,
+      action: FreemiumAction.fromString(json['action']),
+    );
+  }
+}
+
+class SegmentsDeletedEvent extends MessageEvent {
+  final List<String> segmentIds;
+
+  SegmentsDeletedEvent({required this.segmentIds}) : super(eventType: 'segments_deleted');
+
+  factory SegmentsDeletedEvent.fromJson(Map<String, dynamic> json) {
+    return SegmentsDeletedEvent(segmentIds: (json['segment_ids'] as List<dynamic>).map((e) => e.toString()).toList());
   }
 }

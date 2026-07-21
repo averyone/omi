@@ -1,6 +1,6 @@
 from datetime import datetime
 from enum import Enum
-from typing import List, Optional, Any
+from typing import Any, List, Literal, Optional, Union
 
 from pydantic import BaseModel, model_validator
 
@@ -38,9 +38,28 @@ class FileChat(BaseModel):
     def is_image(self):
         return self.mime_type.startswith("image")
 
-    def dict(self, **kwargs):
+    def model_dump(self, **kwargs):
         exclude_fields = {'thumb_name'}
-        return super().dict(exclude=exclude_fields, **kwargs)
+        return super().model_dump(exclude=exclude_fields, **kwargs)
+
+
+class ChartDataPoint(BaseModel):
+    label: str
+    value: float
+
+
+class ChartDataset(BaseModel):
+    label: str
+    data_points: List[ChartDataPoint]
+    color: Optional[str] = None  # hex color, e.g. "#4CAF50"
+
+
+class ChartData(BaseModel):
+    chart_type: Literal['line', 'bar']
+    title: str
+    x_label: Optional[str] = None
+    y_label: Optional[str] = None
+    datasets: List[ChartDataset]
 
 
 class Message(BaseModel):
@@ -60,7 +79,20 @@ class Message(BaseModel):
     files_id: List[str] = []
     files: List[FileChat] = []
     chat_session_id: Optional[str] = None
+    session_id: Optional[str] = None
     data_protection_level: Optional[str] = None
+    langsmith_run_id: Optional[str] = None  # LangSmith run ID for feedback tracking
+    prompt_name: Optional[str] = None  # LangSmith prompt name for versioning
+    prompt_commit: Optional[str] = None  # LangSmith prompt commit/version for traceability
+    rating: Optional[int] = None  # User feedback: 1 = thumbs up, -1 = thumbs down, None = no rating
+    # Desktop journal compatibility fields. These are optional so the existing
+    # message response remains readable by older clients while a new client can
+    # reconcile the canonical turn identity and structured payload exactly.
+    metadata: Optional[str] = None
+    client_message_id: Optional[str] = None
+    message_source: Optional[str] = None
+    journal_revision: Optional[int] = None
+    chart_data: Optional[Union[ChartData, dict]] = None  # Inline chart visualization data
 
     @model_validator(mode='before')
     @classmethod
@@ -75,9 +107,26 @@ class Message(BaseModel):
                 data['app_id'] = plugin_id_val
         return data
 
+    @classmethod
+    def deserialize_many_safe(cls, records, on_error=None) -> List['Message']:
+        """Build Message objects from raw stored records, skipping any that fail
+        validation so one malformed or legacy chat message cannot 500 a whole history
+        load. on_error(record, exception), when provided, is called for each skip."""
+        parsed: List['Message'] = []
+        for record in records:
+            try:
+                parsed.append(cls(**record))
+            except Exception as exc:  # noqa: BLE001 - one bad record must not break the history
+                if on_error is not None:
+                    on_error(record, exc)
+        return parsed
+
     @staticmethod
     def get_messages_as_string(
-        messages: List['Message'], use_user_name_if_available: bool = False, use_plugin_name_if_available: bool = False
+        messages: List['Message'],
+        use_user_name_if_available: bool = False,
+        use_plugin_name_if_available: bool = False,
+        include_file_info: bool = False,
     ) -> str:
         sorted_messages = sorted(messages, key=lambda m: m.created_at)
 
@@ -90,16 +139,27 @@ class Message(BaseModel):
             #         return plugin.name RESTORE ME
             return message.sender.upper()  # TODO: use app id
 
-        formatted_messages = [
-            f"({message.created_at.strftime('%d %b %Y at %H:%M UTC')}) {get_sender_name(message)}: {message.text}"
-            for message in sorted_messages
-        ]
+        formatted_messages = []
+        for message in sorted_messages:
+            msg_text = (
+                f"({message.created_at.strftime('%d %b %Y at %H:%M UTC')}) {get_sender_name(message)}: {message.text}"
+            )
+
+            # Add file info if requested and files exist
+            if include_file_info and message.files_id and len(message.files_id) > 0:
+                file_info = f" [Files attached: {len(message.files_id)} file(s), IDs: {', '.join(message.files_id)}]"
+                msg_text += file_info
+
+            formatted_messages.append(msg_text)
 
         return '\n'.join(formatted_messages)
 
     @staticmethod
     def get_messages_as_xml(
-        messages: List['Message'], use_user_name_if_available: bool = False, use_plugin_name_if_available: bool = False
+        messages: List['Message'],
+        use_user_name_if_available: bool = False,
+        use_plugin_name_if_available: bool = False,
+        include_file_info: bool = False,
     ) -> str:
         sorted_messages = sorted(messages, key=lambda m: m.created_at)
 
@@ -112,27 +172,38 @@ class Message(BaseModel):
             #         return plugin.name RESTORE ME
             return message.sender.upper()  # TODO: use app id
 
-        formatted_messages = [
-            f"""
-                <message>
-                <created_at>
-                    {message.created_at.strftime('%d %b %Y at %H:%M UTC')}
-                </created_at>
-                <sender>
-                    {get_sender_name(message)}
-                </sender>
-                <content>
-                    {message.text}
-                </content>
-                {('<attachments>' + ''.join(f"<file>{file.name}</file>" for file in message.files) + '</attachments>') if message.files and len(message.files) > 0 else ''}
-                </message>
-            """.replace(
-                '    ', ''
-            )
-            .replace('\n\n\n', '\n\n')
-            .strip()
-            for message in sorted_messages
-        ]
+        formatted_messages = []
+        for message in sorted_messages:
+            # Build file section if requested
+            file_section = ""
+            if include_file_info and message.files and len(message.files) > 0:
+                file_section = '<attachments>\n'
+                for file in message.files:
+                    file_section += f'  <file id="{file.id}" name="{file.name}" type="{file.mime_type}"/>\n'
+                file_section += '</attachments>'
+            elif include_file_info and message.files_id and len(message.files_id) > 0:
+                # Fallback if files not loaded but IDs exist
+                file_section = '<attachments>\n'
+                for file_id in message.files_id:
+                    file_section += f'  <file id="{file_id}"/>\n'
+                file_section += '</attachments>'
+            elif message.files and len(message.files) > 0:
+                # Original behavior when include_file_info is False
+                file_section = (
+                    '<attachments>' + ''.join(f"<file>{file.name}</file>" for file in message.files) + '</attachments>'
+                )
+
+            msg = f"""<message>
+<created_at>{message.created_at.strftime('%d %b %Y at %H:%M UTC')}</created_at>
+<sender>{get_sender_name(message)}</sender>
+<content>{message.text}</content>
+{file_section}
+</message>"""
+
+            # Only strip the block's surrounding whitespace. The template above is flush-left, so a
+            # .replace('    ', '') here would instead delete 4-space runs from message.text (code,
+            # tables, aligned or pasted text), corrupting the history shown to the LLM.
+            formatted_messages.append(msg.strip())
 
         return '\n'.join(formatted_messages)
 
@@ -141,9 +212,26 @@ class ResponseMessage(Message):
     ask_for_nps: Optional[bool] = False
 
 
+class PageContext(BaseModel):
+    """Page context for chat - indicates what the user is currently viewing."""
+
+    type: Literal["conversation", "task", "memory", "recap"]
+    id: Optional[str] = None
+    title: Optional[str] = None
+
+
 class SendMessageRequest(BaseModel):
     text: str
     file_ids: Optional[List[str]] = []
+    context: Optional[PageContext] = None
+
+
+class RateMessageRequest(BaseModel):
+    rating: Optional[int] = None
+
+
+class ShareChatMessagesRequest(BaseModel):
+    message_ids: list[str] = []
 
 
 class ChatSession(BaseModel):
@@ -153,6 +241,8 @@ class ChatSession(BaseModel):
     app_id: Optional[str] = None
     plugin_id: Optional[str] = None
     created_at: datetime
+    openai_thread_id: Optional[str] = None
+    openai_assistant_id: Optional[str] = None
 
     @model_validator(mode='before')
     @classmethod

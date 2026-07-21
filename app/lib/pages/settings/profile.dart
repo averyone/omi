@@ -1,21 +1,21 @@
+import 'package:omi/utils/platform/platform_manager.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:omi/backend/preferences.dart';
-import 'package:omi/pages/payments/payments_page.dart';
-import 'package:omi/pages/settings/change_name_widget.dart';
-import 'package:omi/pages/settings/conversation_timeout_dialog.dart';
-import 'package:omi/pages/settings/language_selection_dialog.dart';
-import 'package:omi/pages/settings/people.dart';
-import 'package:omi/pages/settings/privacy.dart';
-import 'package:omi/pages/speech_profile/page.dart';
-import 'package:omi/providers/home_provider.dart';
-import 'package:omi/utils/analytics/mixpanel.dart';
-import 'package:omi/utils/other/temp.dart';
+import 'package:omi/providers/capture_provider.dart';
+import 'package:omi/pages/memories/page.dart';
 import 'package:provider/provider.dart';
-import 'package:flutter_svg/flutter_svg.dart';
-import 'package:omi/gen/assets.gen.dart';
-import 'package:omi/pages/persona/persona_profile.dart';
+import 'package:omi/pages/settings/change_name_widget.dart';
+import 'package:omi/pages/settings/language_settings_page.dart';
+import 'package:omi/pages/settings/custom_vocabulary_page.dart';
+import 'package:omi/pages/settings/people.dart';
+import 'package:omi/pages/speech_profile/page.dart';
+
+import 'package:omi/utils/alerts/app_snackbar.dart';
+import 'package:omi/utils/l10n_extensions.dart';
+import 'package:omi/utils/other/temp.dart';
+import 'package:omi/utils/platform/platform_service.dart';
 
 import 'delete_account.dart';
 
@@ -34,71 +34,84 @@ class _ProfilePageState extends State<ProfilePage> {
 
   Widget _buildSectionContainer({required List<Widget> children}) {
     return Container(
-      decoration: BoxDecoration(
-        color: const Color(0xFF1C1C1E),
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: Column(
-        children: children,
-      ),
+      decoration: BoxDecoration(color: const Color(0xFF1C1C1E), borderRadius: BorderRadius.circular(20)),
+      child: Column(children: children),
     );
   }
 
   Widget _buildProfileItem({
     required String title,
     String? subtitle,
+    String? chipValue,
     required Widget icon,
     required VoidCallback onTap,
     bool showSubtitle = true,
+    bool showBetaTag = false,
+    bool showChevron = true,
   }) {
     return GestureDetector(
       onTap: onTap,
       child: Container(
-        decoration: BoxDecoration(
-          color: const Color(0xFF1C1C1E),
-          borderRadius: BorderRadius.circular(12),
-        ),
+        decoration: BoxDecoration(color: const Color(0xFF1C1C1E), borderRadius: BorderRadius.circular(20)),
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 18),
           child: Row(
             children: [
-              SizedBox(
-                width: 24,
-                height: 24,
-                child: icon,
-              ),
+              SizedBox(width: 24, height: 24, child: icon),
               const SizedBox(width: 16),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      title,
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 17,
-                        fontWeight: FontWeight.w400,
-                      ),
+                    Row(
+                      children: [
+                        Text(
+                          title,
+                          style: const TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.w400),
+                        ),
+                        if (showBetaTag) ...[
+                          const SizedBox(width: 8),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                            decoration: BoxDecoration(
+                              color: Colors.orange.withValues(alpha: 0.2),
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: const Text(
+                              'BETA',
+                              style: TextStyle(
+                                color: Colors.orange,
+                                fontSize: 10,
+                                fontWeight: FontWeight.w600,
+                                letterSpacing: 0.5,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ],
                     ),
-                    if (showSubtitle && subtitle != null) ...[
+                    if (showSubtitle && subtitle != null && chipValue == null) ...[
                       const SizedBox(height: 2),
                       Text(
                         subtitle,
-                        style: const TextStyle(
-                          color: Color(0xFF8E8E93),
-                          fontSize: 15,
-                          fontWeight: FontWeight.w400,
-                        ),
+                        style: const TextStyle(color: Color(0xFF8E8E93), fontSize: 12, fontWeight: FontWeight.w400),
                       ),
                     ],
                   ],
                 ),
               ),
-              const Icon(
-                Icons.chevron_right,
-                color: Color(0xFF3C3C43),
-                size: 20,
-              ),
+              if (chipValue != null) ...[
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  decoration: BoxDecoration(color: const Color(0xFF2A2A2E), borderRadius: BorderRadius.circular(100)),
+                  child: Text(
+                    chipValue,
+                    style: const TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w500),
+                  ),
+                ),
+                if (showChevron) const SizedBox(width: 8),
+              ],
+              if (showChevron) const Icon(Icons.chevron_right, color: Color(0xFF3C3C43), size: 20),
             ],
           ),
         ),
@@ -106,66 +119,346 @@ class _ProfilePageState extends State<ProfilePage> {
     );
   }
 
-  Widget _buildPreferenceToggle({
+  String _voiceResponseModeLabel(int mode) {
+    switch (mode) {
+      case 0:
+        return context.l10n.voiceResponseOff;
+      case 2:
+        return context.l10n.voiceResponseAlways;
+      case 1:
+      default:
+        return context.l10n.voiceResponseHeadphonesOnly;
+    }
+  }
+
+  void _showVoiceResponseModeSheet() {
+    int current = SharedPreferencesUtil().voiceResponseMode;
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF1C1C1E),
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
+      builder: (sheetContext) {
+        return StatefulBuilder(
+          builder: (context, setSheetState) {
+            void pick(int value) {
+              setState(() => SharedPreferencesUtil().voiceResponseMode = value);
+              PlatformManager.instance.analytics.voiceResponseModeChanged(value);
+              Navigator.pop(sheetContext);
+            }
+
+            return SafeArea(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    margin: const EdgeInsets.only(top: 12, bottom: 16),
+                    width: 36,
+                    height: 4,
+                    decoration: BoxDecoration(color: const Color(0xFF3C3C43), borderRadius: BorderRadius.circular(2)),
+                  ),
+                  Text(
+                    context.l10n.voiceResponseModeTitle,
+                    style: const TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.w600),
+                  ),
+                  const SizedBox(height: 16),
+                  ListTile(
+                    title: Text(
+                      context.l10n.voiceResponseOff,
+                      style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w400),
+                    ),
+                    trailing: current == 0 ? const Icon(Icons.check, color: Colors.white, size: 20) : null,
+                    onTap: () => pick(0),
+                  ),
+                  ListTile(
+                    title: Text(
+                      context.l10n.voiceResponseHeadphonesOnly,
+                      style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w400),
+                    ),
+                    trailing: current == 1 ? const Icon(Icons.check, color: Colors.white, size: 20) : null,
+                    onTap: () => pick(1),
+                  ),
+                  ListTile(
+                    title: Text(
+                      context.l10n.voiceResponseAlways,
+                      style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w400),
+                    ),
+                    trailing: current == 2 ? const Icon(Icons.check, color: Colors.white, size: 20) : null,
+                    onTap: () => pick(2),
+                  ),
+                  const SizedBox(height: 16),
+                ],
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Widget _buildProfileStyleItem({
+    required FaIconData icon,
     required String title,
-    required bool value,
-    required Function(bool) onChanged,
-    required VoidCallback onInfoTap,
+    String? chipValue,
+    VoidCallback? onTap,
   }) {
-    return Container(
-      decoration: BoxDecoration(
-        color: const Color(0xFF1C1C1E),
-        borderRadius: BorderRadius.circular(12),
-      ),
+    return InkWell(
+      onTap: onTap,
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 18),
         child: Row(
           children: [
-            SizedBox(
-              width: 24,
-              height: 24,
-              child: FaIcon(FontAwesomeIcons.chartLine, color: Color(0xFF8E8E93), size: 20),
-            ),
+            SizedBox(width: 24, height: 24, child: FaIcon(icon, color: const Color(0xFF8E8E93), size: 20)),
             const SizedBox(width: 16),
             Expanded(
-              child: GestureDetector(
-                onTap: onInfoTap,
+              child: Text(
+                title,
+                style: const TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.w400),
+              ),
+            ),
+            if (chipValue != null) ...[
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                decoration: BoxDecoration(color: const Color(0xFF2A2A2E), borderRadius: BorderRadius.circular(100)),
                 child: Text(
-                  title,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 17,
-                    fontWeight: FontWeight.w400,
-                  ),
+                  chipValue,
+                  style: const TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w500),
                 ),
               ),
-            ),
-            const SizedBox(width: 16),
-            GestureDetector(
-              onTap: () => onChanged(!value),
-              child: Container(
-                decoration: BoxDecoration(
-                  color: value ? const Color(0xFF007AFF) : Colors.transparent,
-                  border: Border.all(
-                    color: value ? const Color(0xFF007AFF) : const Color(0xFF8E8E93),
-                    width: 2,
-                  ),
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                width: 24,
-                height: 24,
-                child: value
-                    ? const Icon(
-                        Icons.check,
-                        color: Colors.white,
-                        size: 16,
-                      )
-                    : null,
-              ),
-            ),
+              const SizedBox(width: 8),
+            ],
+            const Icon(Icons.chevron_right, color: Color(0xFF3C3C43), size: 20),
           ],
         ),
       ),
+    );
+  }
+
+  void _showBackgroundModeSheet() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF1C1C1E),
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
+      builder: (sheetContext) {
+        return StatefulBuilder(
+          builder: (context, setSheetState) {
+            final captureProvider = context.read<CaptureProvider>();
+            final enabled = SharedPreferencesUtil().backgroundModeEnabled;
+            final canEnable = captureProvider.hasNativeBackgroundStreamRoute;
+            void setEnabled(bool value) async {
+              if (value && !canEnable) return;
+              final accepted = await captureProvider.setBackgroundModeEnabled(value);
+              if (accepted) {
+                setSheetState(() {});
+                setState(() {});
+              }
+            }
+
+            return SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(20, 12, 20, 20),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Center(
+                      child: Container(
+                        margin: const EdgeInsets.only(bottom: 16),
+                        width: 36,
+                        height: 4,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF3C3C43),
+                          borderRadius: BorderRadius.circular(2),
+                        ),
+                      ),
+                    ),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            context.l10n.backgroundModeTitle,
+                            style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w600),
+                          ),
+                        ),
+                        Switch(
+                          value: enabled,
+                          activeThumbColor: Colors.white,
+                          activeTrackColor: const Color(0xFF8B5CF6),
+                          onChanged: (enabled || canEnable) ? (v) => setEnabled(v) : null,
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      context.l10n.backgroundModeDescription,
+                      style: TextStyle(color: Colors.grey.shade400, fontSize: 14, height: 1.4),
+                    ),
+                    const SizedBox(height: 16),
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF2A2A2E),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Icon(Icons.info_outline, color: Colors.grey.shade400, size: 18),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              context.l10n.backgroundModeNote,
+                              style: TextStyle(color: Colors.grey.shade400, fontSize: 13, height: 1.4),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    if (!canEnable) ...[
+                      const SizedBox(height: 12),
+                      Container(
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF3A2A2A),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Icon(Icons.warning_amber_rounded, color: Color(0xFFE0A030), size: 18),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Text(
+                                context.l10n.backgroundModeUnavailable,
+                                style: TextStyle(color: Colors.orange.shade200, fontSize: 13, height: 1.4),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  void _showOfflineModeSheet() {
+    final captureProvider = context.read<CaptureProvider>();
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF1C1C1E),
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
+      builder: (sheetContext) {
+        return StatefulBuilder(
+          builder: (context, setSheetState) {
+            final enabled = SharedPreferencesUtil().batchModeEnabled;
+            Future<void> setEnabled(bool value) async {
+              final accepted = await captureProvider.setBatchMode(value);
+              if (!accepted && context.mounted) {
+                AppSnackbar.showSnackbarError(context.l10n.transcribeLaterNote);
+              }
+              if (sheetContext.mounted) {
+                setSheetState(() {});
+              }
+              if (mounted) {
+                setState(() {});
+              }
+            }
+
+            return SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(20, 12, 20, 20),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Center(
+                      child: Container(
+                        margin: const EdgeInsets.only(bottom: 16),
+                        width: 36,
+                        height: 4,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF3C3C43),
+                          borderRadius: BorderRadius.circular(2),
+                        ),
+                      ),
+                    ),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            context.l10n.transcribeLaterTitle,
+                            style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w600),
+                          ),
+                        ),
+                        Switch(
+                          value: enabled,
+                          activeThumbColor: Colors.white,
+                          activeTrackColor: const Color(0xFF8B5CF6),
+                          onChanged: (v) => setEnabled(v),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      context.l10n.transcribeLaterDescription,
+                      style: TextStyle(color: Colors.grey.shade400, fontSize: 14, height: 1.4),
+                    ),
+                    const SizedBox(height: 16),
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF2A2A2E),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Icon(Icons.info_outline, color: Colors.grey.shade400, size: 18),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              context.l10n.transcribeLaterNote,
+                              style: TextStyle(color: Colors.grey.shade400, fontSize: 13, height: 1.4),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    if (SharedPreferencesUtil().getBool('batchStorageFull')) ...[
+                      const SizedBox(height: 12),
+                      Container(
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF3A2A2A),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Icon(Icons.warning_amber_rounded, color: Color(0xFFE0A030), size: 18),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Text(
+                                context.l10n.transcribeLaterStorageFull,
+                                style: TextStyle(color: Colors.orange.shade200, fontSize: 13, height: 1.4),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
     );
   }
 
@@ -174,13 +467,9 @@ class _ProfilePageState extends State<ProfilePage> {
     return Scaffold(
       backgroundColor: const Color(0xFF000000),
       appBar: AppBar(
-        title: const Text(
-          'Profile',
-          style: TextStyle(
-            color: Colors.white,
-            fontSize: 18,
-            fontWeight: FontWeight.w600,
-          ),
+        title: Text(
+          context.l10n.profile,
+          style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w600),
         ),
         centerTitle: true,
         backgroundColor: const Color(0xFF000000),
@@ -197,11 +486,13 @@ class _ProfilePageState extends State<ProfilePage> {
             _buildSectionContainer(
               children: [
                 _buildProfileItem(
-                  title: SharedPreferencesUtil().givenName.isEmpty ? 'Set Your Name' : 'Change Your Name',
-                  subtitle: SharedPreferencesUtil().givenName.isEmpty ? 'Not set' : SharedPreferencesUtil().givenName,
-                  icon: const FaIcon(FontAwesomeIcons.solidUser, color: Color(0xFF8E8E93), size: 20),
+                  title: context.l10n.name,
+                  chipValue: SharedPreferencesUtil().givenName.isEmpty
+                      ? context.l10n.notSet
+                      : SharedPreferencesUtil().givenName,
+                  icon: FaIcon(FontAwesomeIcons.solidUser, color: Color(0xFF8E8E93), size: 20),
                   onTap: () async {
-                    MixpanelManager().pageOpened('Profile Change Name');
+                    PlatformManager.instance.analytics.pageOpened('Profile Change Name');
                     await showDialog(
                       context: context,
                       builder: (BuildContext context) {
@@ -211,44 +502,36 @@ class _ProfilePageState extends State<ProfilePage> {
                   },
                 ),
                 const Divider(height: 1, color: Color(0xFF3C3C43)),
-                Consumer<HomeProvider>(
-                  builder: (context, homeProvider, _) {
-                    final languageName = homeProvider.userPrimaryLanguage.isNotEmpty
-                        ? homeProvider.availableLanguages.entries
-                            .firstWhere(
-                              (element) => element.value == homeProvider.userPrimaryLanguage,
-                            )
-                            .key
-                        : 'Not set';
-
-                    return _buildProfileItem(
-                      title: 'Primary Language',
-                      subtitle: languageName,
-                      icon: const FaIcon(FontAwesomeIcons.globe, color: Color(0xFF8E8E93), size: 20),
-                      onTap: () async {
-                        MixpanelManager().pageOpened('Profile Change Language');
-                        await LanguageSelectionDialog.show(context, isRequired: false, forceShow: true);
-                        await homeProvider.setupUserPrimaryLanguage();
-                        setState(() {});
-                      },
-                    );
+                _buildProfileItem(
+                  title: context.l10n.email,
+                  chipValue:
+                      SharedPreferencesUtil().email.isEmpty ? context.l10n.notSet : SharedPreferencesUtil().email,
+                  icon: FaIcon(FontAwesomeIcons.solidEnvelope, color: Color(0xFF8E8E93), size: 20),
+                  onTap: () {},
+                  showChevron: false,
+                ),
+                const Divider(height: 1, color: Color(0xFF3C3C43)),
+                _buildProfileItem(
+                  title: context.l10n.language,
+                  icon: FaIcon(FontAwesomeIcons.globe, color: Color(0xFF8E8E93), size: 20),
+                  onTap: () {
+                    routeToPage(context, const LanguageSettingsPage());
                   },
                 ),
                 const Divider(height: 1, color: Color(0xFF3C3C43)),
                 _buildProfileItem(
-                  title: 'Persona',
-                  subtitle: 'Manage your Omi persona',
-                  icon: const FaIcon(FontAwesomeIcons.solidCircleUser, color: Color(0xFF8E8E93), size: 20),
+                  title: context.l10n.customVocabulary,
+                  icon: FaIcon(FontAwesomeIcons.book, color: Color(0xFF8E8E93), size: 20),
                   onTap: () {
-                    Navigator.of(context).push(
-                      MaterialPageRoute(
-                        builder: (context) => const PersonaProfilePage(),
-                        settings: const RouteSettings(
-                          arguments: 'from_settings',
-                        ),
-                      ),
-                    );
-                    MixpanelManager().pageOpened('Profile Persona Settings');
+                    routeToPage(context, const CustomVocabularyPage());
+                  },
+                ),
+                const Divider(height: 1, color: Color(0xFF3C3C43)),
+                _buildProfileItem(
+                  title: context.l10n.memories,
+                  icon: FaIcon(FontAwesomeIcons.brain, color: Color(0xFF8E8E93), size: 20),
+                  onTap: () {
+                    routeToPage(context, const MemoriesPage());
                   },
                 ),
               ],
@@ -259,88 +542,75 @@ class _ProfilePageState extends State<ProfilePage> {
             _buildSectionContainer(
               children: [
                 _buildProfileItem(
-                  title: 'Speech Profile',
-                  subtitle: 'Teach Omi your voice',
-                  icon: const FaIcon(FontAwesomeIcons.microphone, color: Color(0xFF8E8E93), size: 20),
+                  title: context.l10n.speechProfile,
+                  icon: FaIcon(FontAwesomeIcons.microphone, color: Color(0xFF8E8E93), size: 20),
                   onTap: () {
                     routeToPage(context, const SpeechProfilePage());
-                    MixpanelManager().pageOpened('Profile Speech Profile');
+                    PlatformManager.instance.analytics.pageOpened('Profile Speech Profile');
                   },
                 ),
                 const Divider(height: 1, color: Color(0xFF3C3C43)),
                 _buildProfileItem(
-                  title: 'Identifying Others',
-                  subtitle: 'Tell Omi who said it 🗣️',
-                  icon: const FaIcon(FontAwesomeIcons.users, color: Color(0xFF8E8E93), size: 20),
+                  title: context.l10n.identifyingOthers,
+                  icon: FaIcon(FontAwesomeIcons.users, color: Color(0xFF8E8E93), size: 20),
                   onTap: () {
                     routeToPage(context, const UserPeoplePage());
                   },
                 ),
                 const Divider(height: 1, color: Color(0xFF3C3C43)),
+                _buildProfileStyleItem(
+                  icon: FontAwesomeIcons.volumeHigh,
+                  title: context.l10n.voiceResponseMode,
+                  chipValue: _voiceResponseModeLabel(SharedPreferencesUtil().voiceResponseMode),
+                  onTap: _showVoiceResponseModeSheet,
+                ),
+                if (PlatformService.isAndroid) ...[
+                  const Divider(height: 1, color: Color(0xFF3C3C43)),
+                  _buildProfileItem(
+                    title: context.l10n.backgroundModeTitle,
+                    icon: FaIcon(FontAwesomeIcons.towerBroadcast, color: Color(0xFF8E8E93), size: 20),
+                    showBetaTag: true,
+                    chipValue: SharedPreferencesUtil().backgroundModeEnabled ? context.l10n.on : context.l10n.off,
+                    onTap: _showBackgroundModeSheet,
+                  ),
+                ],
+                const Divider(height: 1, color: Color(0xFF3C3C43)),
                 _buildProfileItem(
-                  title: 'Conversation Timeout',
-                  subtitle: 'Set silence duration before auto-end',
-                  icon: const FaIcon(FontAwesomeIcons.clock, color: Color(0xFF8E8E93), size: 20),
-                  onTap: () {
-                    ConversationTimeoutDialog.show(context);
-                  },
+                  title: context.l10n.transcribeLaterTitle,
+                  icon: FaIcon(FontAwesomeIcons.floppyDisk, color: Color(0xFF8E8E93), size: 20),
+                  showBetaTag: true,
+                  chipValue: SharedPreferencesUtil().batchModeEnabled ? context.l10n.on : context.l10n.off,
+                  onTap: _showOfflineModeSheet,
                 ),
               ],
-            ),
-            const SizedBox(height: 32),
-
-            // PAYMENT SECTION
-            _buildSectionContainer(
-              children: [
-                _buildProfileItem(
-                  title: 'Payment Methods',
-                  subtitle: 'Add or change your payment method',
-                  icon: const FaIcon(FontAwesomeIcons.solidCreditCard, color: Color(0xFF8E8E93), size: 20),
-                  onTap: () {
-                    routeToPage(context, const PaymentsPage());
-                  },
-                ),
-              ],
-            ),
-            const SizedBox(height: 32),
-
-            // PREFERENCES SECTION
-            _buildPreferenceToggle(
-              title: 'Help improve Omi by sharing anonymized analytics data',
-              value: SharedPreferencesUtil().optInAnalytics,
-              onChanged: (value) {
-                setState(() {
-                  SharedPreferencesUtil().optInAnalytics = value;
-                  value ? MixpanelManager().optInTracking() : MixpanelManager().optOutTracking();
-                });
-              },
-              onInfoTap: () {
-                routeToPage(context, const PrivacyInfoPage());
-                MixpanelManager().pageOpened('Share Analytics Data Details');
-              },
             ),
             const SizedBox(height: 32),
 
             // ACCOUNT SECTION
             _buildSectionContainer(
               children: [
-                _buildProfileItem(
-                  title: 'User ID',
-                  subtitle: SharedPreferencesUtil().uid,
-                  icon: const FaIcon(FontAwesomeIcons.solidClipboard, color: Color(0xFF8E8E93), size: 20),
-                  onTap: () {
-                    Clipboard.setData(ClipboardData(text: SharedPreferencesUtil().uid));
-                    ScaffoldMessenger.of(context)
-                        .showSnackBar(const SnackBar(content: Text('User ID copied to clipboard')));
+                Builder(
+                  builder: (context) {
+                    final uid = SharedPreferencesUtil().uid;
+                    final truncatedUid =
+                        uid.length > 6 ? '${uid.substring(0, 3)}•••••${uid.substring(uid.length - 3)}' : uid;
+                    return _buildProfileItem(
+                      title: context.l10n.userId,
+                      chipValue: truncatedUid,
+                      icon: FaIcon(FontAwesomeIcons.solidClipboard, color: Color(0xFF8E8E93), size: 20),
+                      onTap: () {
+                        Clipboard.setData(ClipboardData(text: uid));
+                        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.userIdCopied)));
+                      },
+                    );
                   },
                 ),
                 const Divider(height: 1, color: Color(0xFF3C3C43)),
                 _buildProfileItem(
-                  title: 'Delete Account',
-                  subtitle: 'Delete your account and all data',
-                  icon: const FaIcon(FontAwesomeIcons.exclamationTriangle, color: Colors.red, size: 20),
+                  title: context.l10n.deleteAccountTitle,
+                  icon: FaIcon(FontAwesomeIcons.exclamationTriangle, color: Colors.red, size: 20),
                   onTap: () {
-                    MixpanelManager().pageOpened('Profile Delete Account Dialog');
+                    PlatformManager.instance.analytics.pageOpened('Profile Delete Account Dialog');
                     Navigator.push(context, MaterialPageRoute(builder: (context) => const DeleteAccount()));
                   },
                 ),

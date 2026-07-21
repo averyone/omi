@@ -1,13 +1,14 @@
 import 'dart:io';
-import 'package:firebase_auth/firebase_auth.dart';
+
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
-import 'package:omi/backend/preferences.dart';
-import 'package:omi/providers/auth_provider.dart';
-import 'package:omi/widgets/consent_bottom_sheet.dart';
 import 'package:provider/provider.dart';
+
+import 'package:omi/providers/auth_provider.dart';
+import 'package:omi/utils/l10n_extensions.dart';
 
 class AuthComponent extends StatefulWidget {
   final VoidCallback onSignIn;
@@ -36,10 +37,7 @@ class _AuthComponentState extends State<AuthComponent> {
               padding: EdgeInsets.fromLTRB(32, 26, 32, MediaQuery.of(context).padding.bottom + 8),
               decoration: const BoxDecoration(
                 color: Colors.black,
-                borderRadius: BorderRadius.only(
-                  topLeft: Radius.circular(40),
-                  topRight: Radius.circular(40),
-                ),
+                borderRadius: BorderRadius.only(topLeft: Radius.circular(40), topRight: Radius.circular(40)),
               ),
               child: SafeArea(
                 top: false,
@@ -51,17 +49,15 @@ class _AuthComponentState extends State<AuthComponent> {
                       height: 20,
                       child: provider.loading
                           ? const Center(
-                              child: CircularProgressIndicator(
-                                valueColor: AlwaysStoppedAnimation(Colors.white),
-                              ),
+                              child: CircularProgressIndicator(valueColor: AlwaysStoppedAnimation(Colors.white)),
                             )
                           : null,
                     ),
 
                     // Title text
-                    const Text(
-                      'Speak. Transcribe. Summarize.',
-                      style: TextStyle(
+                    Text(
+                      context.l10n.speakTranscribeSummarize,
+                      style: const TextStyle(
                         color: Colors.white,
                         fontSize: 32,
                         fontWeight: FontWeight.bold,
@@ -74,46 +70,28 @@ class _AuthComponentState extends State<AuthComponent> {
                     const SizedBox(height: 32),
 
                     // Sign in buttons
-                    if (Platform.isIOS || Platform.isMacOS) ...[
+                    if (Platform.isIOS || Platform.isAndroid) ...[
                       SizedBox(
                         width: double.infinity,
                         height: 56,
                         child: ElevatedButton(
                           onPressed: () {
                             HapticFeedback.mediumImpact();
-                            ConsentBottomSheet.show(
-                              context,
-                              authMethod: 'apple',
-                              onContinue: () async {
-                                final user = FirebaseAuth.instance.currentUser;
-                                if (user != null && user.isAnonymous && SharedPreferencesUtil().hasPersonaCreated) {
-                                  await provider.linkWithApple();
-                                  if (mounted) {
-                                    SharedPreferencesUtil().hasOmiDevice = true;
-                                    SharedPreferencesUtil().verifiedPersonaId = null;
-                                    widget.onSignIn();
-                                  }
-                                } else {
-                                  provider.onAppleSignIn(widget.onSignIn);
-                                }
-                              },
-                            );
+                            provider.onAppleSignIn(widget.onSignIn);
                           },
                           style: ElevatedButton.styleFrom(
                             backgroundColor: Colors.white,
                             foregroundColor: Colors.black,
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(28),
-                            ),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
                           ),
-                          child: const Row(
+                          child: Row(
                             mainAxisAlignment: MainAxisAlignment.center,
                             children: [
-                              Icon(FontAwesomeIcons.apple, size: 24),
-                              SizedBox(width: 8),
+                              FaIcon(FontAwesomeIcons.apple, size: 24),
+                              const SizedBox(width: 8),
                               Text(
-                                'Sign in with Apple',
-                                style: TextStyle(
+                                context.l10n.signInWithApple,
+                                style: const TextStyle(
                                   fontSize: 18,
                                   fontWeight: FontWeight.w600,
                                   fontFamily: 'Manrope',
@@ -133,43 +111,21 @@ class _AuthComponentState extends State<AuthComponent> {
                       child: ElevatedButton(
                         onPressed: () {
                           HapticFeedback.mediumImpact();
-                          ConsentBottomSheet.show(
-                            context,
-                            authMethod: 'google',
-                            onContinue: () async {
-                              final user = FirebaseAuth.instance.currentUser;
-                              if (user != null && user.isAnonymous && SharedPreferencesUtil().hasPersonaCreated) {
-                                await provider.linkWithGoogle();
-                                if (mounted) {
-                                  SharedPreferencesUtil().hasOmiDevice = true;
-                                  SharedPreferencesUtil().verifiedPersonaId = null;
-                                  widget.onSignIn();
-                                }
-                              } else {
-                                provider.onGoogleSignIn(widget.onSignIn);
-                              }
-                            },
-                          );
+                          provider.onGoogleSignIn(widget.onSignIn);
                         },
                         style: ElevatedButton.styleFrom(
                           backgroundColor: Colors.white,
                           foregroundColor: Colors.black,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(28),
-                          ),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
                         ),
-                        child: const Row(
+                        child: Row(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
-                            Icon(FontAwesomeIcons.google, size: 20),
-                            SizedBox(width: 8),
+                            FaIcon(FontAwesomeIcons.google, size: 20),
+                            const SizedBox(width: 8),
                             Text(
-                              'Sign in with Google',
-                              style: TextStyle(
-                                fontSize: 18,
-                                fontWeight: FontWeight.w600,
-                                fontFamily: 'Manrope',
-                              ),
+                              context.l10n.signInWithGoogle,
+                              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600, fontFamily: 'Manrope'),
                             ),
                           ],
                         ),
@@ -183,25 +139,21 @@ class _AuthComponentState extends State<AuthComponent> {
                       textAlign: TextAlign.center,
                       text: TextSpan(
                         style: TextStyle(
-                          color: Colors.white.withOpacity(0.6),
+                          color: Colors.white.withValues(alpha: 0.6),
                           fontSize: 11,
                           fontFamily: 'Manrope',
                         ),
                         children: [
-                          const TextSpan(text: 'By continuing, you agree to our '),
+                          TextSpan(text: context.l10n.byContinuingAgree),
                           TextSpan(
-                            text: 'Privacy Policy',
-                            style: const TextStyle(
-                              decoration: TextDecoration.underline,
-                            ),
+                            text: context.l10n.privacyPolicy,
+                            style: const TextStyle(decoration: TextDecoration.underline),
                             recognizer: TapGestureRecognizer()..onTap = provider.openPrivacyPolicy,
                           ),
                           const TextSpan(text: ' & '),
                           TextSpan(
-                            text: 'Terms of Use',
-                            style: const TextStyle(
-                              decoration: TextDecoration.underline,
-                            ),
+                            text: context.l10n.termsOfUse,
+                            style: const TextStyle(decoration: TextDecoration.underline),
                             recognizer: TapGestureRecognizer()..onTap = provider.openTermsOfService,
                           ),
                           const TextSpan(text: '.'),

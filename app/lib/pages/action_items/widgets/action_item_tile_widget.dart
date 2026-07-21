@@ -1,37 +1,48 @@
 import 'dart:ui';
 
+import 'package:omi/utils/platform/platform_manager.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+
+import 'package:font_awesome_flutter/font_awesome_flutter.dart';
+import 'package:provider/provider.dart';
+
+import 'package:omi/backend/http/api/action_items.dart';
 import 'package:omi/backend/schema/schema.dart';
-import 'package:omi/gen/assets.gen.dart';
+import 'package:omi/pages/settings/task_integrations_page.dart';
 import 'package:omi/pages/settings/usage_page.dart';
-import 'package:omi/services/apple_reminders_service.dart';
-import 'package:omi/utils/analytics/mixpanel.dart';
+import 'package:omi/providers/task_integration_provider.dart';
+import 'package:omi/providers/usage_provider.dart';
+import 'package:omi/services/integrations/apple_reminders_service.dart';
+import 'package:omi/services/integrations/asana_service.dart';
+import 'package:omi/services/integrations/clickup_service.dart';
+import 'package:omi/services/integrations/google_tasks_service.dart';
+import 'package:omi/services/integrations/todoist_service.dart';
+import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/other/temp.dart';
 import 'package:omi/utils/platform/platform_service.dart';
-
 import 'action_item_form_sheet.dart';
 
 class ActionItemTileWidget extends StatefulWidget {
   final ActionItemWithMetadata actionItem;
   final Function(bool) onToggle;
-  final Set<String>? exportedToAppleReminders;
-  final VoidCallback? onExportedToAppleReminders;
+  final VoidCallback? onRefresh;
   final bool isSelectionMode;
   final bool isSelected;
   final VoidCallback? onLongPress;
   final VoidCallback? onSelectionToggle;
+  final bool isSnoozedTab;
 
   const ActionItemTileWidget({
     super.key,
     required this.actionItem,
     required this.onToggle,
-    this.exportedToAppleReminders,
-    this.onExportedToAppleReminders,
+    this.onRefresh,
     this.isSelectionMode = false,
     this.isSelected = false,
     this.onLongPress,
     this.onSelectionToggle,
+    this.isSnoozedTab = false,
   });
 
   @override
@@ -52,6 +63,13 @@ class _ActionItemTileWidgetState extends State<ActionItemTileWidget> {
     HapticFeedback.mediumImpact();
 
     final newState = !widget.actionItem.completed;
+
+    // Track action item checked/unchecked
+    PlatformManager.instance.analytics.actionItemChecked(
+      actionItemId: widget.actionItem.id,
+      completed: newState,
+      timestamp: DateTime.now(),
+    );
 
     if (newState) {
       setState(() {
@@ -76,11 +94,7 @@ class _ActionItemTileWidgetState extends State<ActionItemTileWidget> {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (context) => ActionItemFormSheet(
-        actionItem: widget.actionItem,
-        exportedToAppleReminders: widget.exportedToAppleReminders,
-        onExportedToAppleReminders: widget.onExportedToAppleReminders,
-      ),
+      builder: (context) => ActionItemFormSheet(actionItem: widget.actionItem, onRefresh: widget.onRefresh),
     );
   }
 
@@ -96,62 +110,54 @@ class _ActionItemTileWidgetState extends State<ActionItemTileWidget> {
 
     Color chipColor;
     Color textColor;
-    IconData icon;
     String dueDateText;
 
-    if (widget.actionItem.completed) {
-      chipColor = Colors.grey.withOpacity(0.2);
+    // For snoozed tab, always show actual date/time instead of relative labels
+    if (widget.isSnoozedTab) {
+      chipColor = Colors.grey.withValues(alpha: 0.2);
+      textColor = Colors.grey.shade400;
+      dueDateText = _formatDueDate(context, dueDate, showFullDate: true);
+    } else if (widget.actionItem.completed) {
+      chipColor = Colors.grey.withValues(alpha: 0.2);
       textColor = Colors.grey.shade500;
-      icon = Icons.check_circle_outline;
-      dueDateText = _formatDueDate(dueDate);
+      dueDateText = _formatDueDate(context, dueDate);
     } else if (isOverdue) {
-      chipColor = Colors.red.withOpacity(0.15);
+      chipColor = Colors.red.withValues(alpha: 0.15);
       textColor = Colors.red.shade300;
-      icon = Icons.warning_amber_rounded;
-      dueDateText = 'Overdue';
+      dueDateText = _formatDueDate(context, dueDate);
     } else if (isToday) {
-      chipColor = Colors.orange.withOpacity(0.15);
-      textColor = Colors.orange.shade300;
-      icon = Icons.today;
-      dueDateText = 'Today';
+      chipColor = Colors.yellow.withValues(alpha: 0.15);
+      textColor = Colors.yellow.shade300;
+      dueDateText = context.l10n.today;
     } else if (isTomorrow) {
-      chipColor = Colors.blue.withOpacity(0.15);
+      chipColor = Colors.blue.withValues(alpha: 0.15);
       textColor = Colors.blue.shade300;
-      icon = Icons.event;
-      dueDateText = 'Tomorrow';
+      dueDateText = context.l10n.tomorrow;
     } else if (isThisWeek) {
-      chipColor = Colors.green.withOpacity(0.15);
+      chipColor = Colors.green.withValues(alpha: 0.15);
       textColor = Colors.green.shade300;
-      icon = Icons.calendar_today;
-      dueDateText = _formatDueDate(dueDate);
+      dueDateText = _formatDueDate(context, dueDate);
     } else {
-      chipColor = Colors.purple.withOpacity(0.15);
+      chipColor = Colors.purple.withValues(alpha: 0.15);
       textColor = Colors.purple.shade300;
-      icon = Icons.schedule;
-      dueDateText = _formatDueDate(dueDate);
+      dueDateText = _formatDueDate(context, dueDate);
     }
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      decoration: BoxDecoration(
-        color: chipColor,
-        borderRadius: BorderRadius.circular(12),
-      ),
+      decoration: BoxDecoration(color: chipColor, borderRadius: BorderRadius.circular(8)),
       child: Row(
         mainAxisSize: MainAxisSize.min,
+        mainAxisAlignment: MainAxisAlignment.center,
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          Icon(
-            icon,
-            size: 14,
-            color: textColor,
-          ),
-          const SizedBox(width: 4),
-          Text(
-            dueDateText,
-            style: TextStyle(
-              color: textColor,
-              fontSize: 12,
-              fontWeight: FontWeight.w500,
+          FaIcon(FontAwesomeIcons.solidCalendar, size: 11, color: textColor),
+          const SizedBox(width: 6),
+          Padding(
+            padding: const EdgeInsets.only(top: 1),
+            child: Text(
+              dueDateText,
+              style: TextStyle(color: textColor, fontSize: 12, fontWeight: FontWeight.w500),
             ),
           ),
         ],
@@ -163,57 +169,112 @@ class _ActionItemTileWidgetState extends State<ActionItemTileWidget> {
     return date1.year == date2.year && date1.month == date2.month && date1.day == date2.day;
   }
 
-  String _formatDueDate(DateTime date) {
+  String _formatDueDate(BuildContext context, DateTime date, {bool showFullDate = false}) {
+    final months = [
+      context.l10n.monthJan,
+      context.l10n.monthFeb,
+      context.l10n.monthMar,
+      context.l10n.monthApr,
+      context.l10n.monthMay,
+      context.l10n.monthJun,
+      context.l10n.monthJul,
+      context.l10n.monthAug,
+      context.l10n.monthSep,
+      context.l10n.monthOct,
+      context.l10n.monthNov,
+      context.l10n.monthDec,
+    ];
+
+    if (showFullDate) {
+      final now = DateTime.now();
+      final hour = date.hour;
+      final minute = date.minute;
+      final hasTime = hour != 0 || minute != 0;
+
+      String dateStr = '${months[date.month - 1]} ${date.day}';
+
+      if (date.year != now.year) {
+        dateStr += ', ${date.year}';
+      }
+
+      if (hasTime && !(hour == 23 && minute == 59)) {
+        final period = hour >= 12 ? context.l10n.timePM : context.l10n.timeAM;
+        final displayHour = hour == 0 ? 12 : (hour > 12 ? hour - 12 : hour);
+        final displayMinute = minute.toString().padLeft(2, '0');
+        dateStr += ', $displayHour:$displayMinute $period';
+      }
+
+      return dateStr;
+    }
+
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
     final targetDate = DateTime(date.year, date.month, date.day);
     final difference = targetDate.difference(today).inDays;
     if (difference == 0) {
-      return 'Today';
+      return context.l10n.today;
     } else if (difference == 1) {
-      return 'Tomorrow';
+      return context.l10n.tomorrow;
     } else if (difference == -1) {
-      return 'Yesterday';
+      return context.l10n.yesterday;
     } else if (difference > 1 && difference <= 7) {
-      final weekdays = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+      final weekdays = [
+        context.l10n.weekdayMon,
+        context.l10n.weekdayTue,
+        context.l10n.weekdayWed,
+        context.l10n.weekdayThu,
+        context.l10n.weekdayFri,
+        context.l10n.weekdaySat,
+        context.l10n.weekdaySun,
+      ];
       return weekdays[date.weekday - 1];
     } else {
-      final months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
       return '${months[date.month - 1]} ${date.day}';
     }
   }
 
-  Widget _buildAppleRemindersIcon(BuildContext context) {
-    final isExported = widget.exportedToAppleReminders?.contains(widget.actionItem.description) ?? false;
+  Widget _buildTaskExportIcon(BuildContext context) {
+    // If already exported, show the export platform logo
+    // Otherwise, show the currently selected task app
+    TaskIntegrationApp displayApp;
+    bool isExported = widget.actionItem.exported;
+
+    if (isExported && widget.actionItem.exportPlatform != null) {
+      // Show the platform it was exported to
+      displayApp = TaskIntegrationApp.values.firstWhere(
+        (app) => app.key == widget.actionItem.exportPlatform,
+        orElse: () => TaskIntegrationApp.appleReminders,
+      );
+    } else {
+      // Show the currently selected app for export
+      final provider = context.watch<TaskIntegrationProvider>();
+      displayApp = provider.selectedApp;
+    }
 
     return GestureDetector(
-      onTap: () => _handleAppleRemindersExport(context),
+      onTap: isExported ? null : () => _handleTaskExport(context, displayApp),
       child: Container(
         width: 32,
         height: 32,
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(8),
-        ),
+        decoration: BoxDecoration(borderRadius: BorderRadius.circular(8)),
         child: Stack(
           alignment: Alignment.center,
           children: [
-            // Apple Reminders logo
-            Container(
-              width: 24,
-              height: 24,
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(6),
-              ),
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(6),
-                child: Image.asset(
-                  Assets.images.appleRemindersLogo.path,
-                  width: 24,
-                  height: 24,
-                  fit: BoxFit.contain,
-                ),
-              ),
-            ),
+            // Task app logo or icon
+            displayApp.logoPath != null
+                ? ClipRRect(
+                    borderRadius: BorderRadius.circular(6),
+                    child: Image.asset(displayApp.logoPath!, width: 24, height: 24, fit: BoxFit.contain),
+                  )
+                : Container(
+                    width: 24,
+                    height: 24,
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(6),
+                      color: displayApp.iconColor.withValues(alpha: 0.2),
+                    ),
+                    child: FaIcon(displayApp.icon, color: displayApp.iconColor, size: 16),
+                  ),
             // Status indicator at bottom right
             Positioned(
               bottom: 0,
@@ -224,16 +285,9 @@ class _ActionItemTileWidgetState extends State<ActionItemTileWidget> {
                 decoration: BoxDecoration(
                   color: isExported ? Colors.green : Colors.blue,
                   shape: BoxShape.circle,
-                  border: Border.all(
-                    color: const Color(0xFF1F1F25),
-                    width: 1.5,
-                  ),
+                  border: Border.all(color: const Color(0xFF1F1F25), width: 1.5),
                 ),
-                child: Icon(
-                  isExported ? Icons.check : Icons.add,
-                  color: Colors.white,
-                  size: 8,
-                ),
+                child: Icon(isExported ? Icons.check : Icons.add, color: Colors.white, size: 8),
               ),
             ),
           ],
@@ -242,28 +296,495 @@ class _ActionItemTileWidgetState extends State<ActionItemTileWidget> {
     );
   }
 
+  Future<void> _handleTaskExport(BuildContext context, TaskIntegrationApp taskApp) async {
+    if (taskApp == TaskIntegrationApp.appleReminders) {
+      await _handleAppleRemindersExport(context);
+    } else if (taskApp == TaskIntegrationApp.todoist) {
+      await _handleTodoistExport(context);
+    } else if (taskApp == TaskIntegrationApp.asana) {
+      await _handleAsanaExport(context);
+    } else if (taskApp == TaskIntegrationApp.googleTasks) {
+      await _handleGoogleTasksExport(context);
+    } else if (taskApp == TaskIntegrationApp.clickup) {
+      await _handleClickUpExport(context);
+    } else {
+      // Show coming soon message for other integrations
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Row(
+              children: [
+                const Icon(Icons.info, color: Colors.white, size: 20),
+                const SizedBox(width: 8),
+                Text(context.l10n.serviceIntegrationComingSoon(taskApp.displayName)),
+              ],
+            ),
+            backgroundColor: Colors.orange,
+            duration: const Duration(seconds: 2),
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _handleTodoistExport(BuildContext context) async {
+    HapticFeedback.mediumImpact();
+
+    final service = TodoistService();
+
+    // Check if already exported
+    if (widget.actionItem.exported) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Row(
+              children: [
+                const Icon(Icons.check_circle, color: Colors.white, size: 20),
+                const SizedBox(width: 8),
+                Text(context.l10n.alreadyExportedTo(widget.actionItem.exportPlatform ?? context.l10n.anotherPlatform)),
+              ],
+            ),
+            backgroundColor: Colors.orange,
+            duration: const Duration(seconds: 2),
+          ),
+        );
+      }
+      return;
+    }
+
+    // Check if authenticated
+    if (!service.isAuthenticated) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Row(
+              children: [
+                const Icon(Icons.error, color: Colors.white, size: 20),
+                const SizedBox(width: 8),
+                Text(context.l10n.pleaseAuthenticateWithService('Todoist')),
+              ],
+            ),
+            backgroundColor: Colors.orange,
+            duration: const Duration(seconds: 4),
+          ),
+        );
+      }
+      return;
+    }
+
+    // Show loading state
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Row(
+            children: [
+              const SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Text(context.l10n.addingToService('Todoist')),
+            ],
+          ),
+          backgroundColor: Colors.blue,
+          duration: const Duration(seconds: 3),
+        ),
+      );
+    }
+
+    // Create task in Todoist
+    final success = await service.createTask(
+      content: widget.actionItem.description,
+      description: 'From Omi',
+      dueDate: widget.actionItem.dueAt,
+    );
+
+    if (context.mounted) {
+      // Clear the loading snackbar
+      ScaffoldMessenger.of(context).clearSnackBars();
+
+      // Show result
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Row(
+            children: [
+              Icon(success ? Icons.check_circle : Icons.error, color: Colors.white, size: 20),
+              const SizedBox(width: 8),
+              Text(success ? context.l10n.addedToService('Todoist') : context.l10n.failedToAddToService('Todoist')),
+            ],
+          ),
+          backgroundColor: success ? Colors.green : Colors.red,
+          duration: const Duration(seconds: 3),
+        ),
+      );
+
+      // If successful, update the action item with export metadata
+      if (success) {
+        final exportTime = DateTime.now();
+        await updateActionItem(widget.actionItem.id, exported: true, exportDate: exportTime, exportPlatform: 'todoist');
+
+        // Track action item export
+        PlatformManager.instance.analytics.actionItemExported(
+          actionItemId: widget.actionItem.id,
+          appName: 'Todoist',
+          timestamp: exportTime,
+        );
+
+        widget.onRefresh?.call();
+      }
+    }
+  }
+
+  Future<void> _handleAsanaExport(BuildContext context) async {
+    HapticFeedback.mediumImpact();
+
+    final service = AsanaService();
+
+    // Check if already exported
+    if (widget.actionItem.exported) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Row(
+              children: [
+                const Icon(Icons.check_circle, color: Colors.white, size: 20),
+                const SizedBox(width: 8),
+                Text(context.l10n.alreadyExportedTo(widget.actionItem.exportPlatform ?? context.l10n.anotherPlatform)),
+              ],
+            ),
+            backgroundColor: Colors.orange,
+            duration: const Duration(seconds: 2),
+          ),
+        );
+      }
+      return;
+    }
+
+    // Check if authenticated
+    if (!service.isAuthenticated) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Row(
+              children: [
+                const Icon(Icons.error, color: Colors.white, size: 20),
+                const SizedBox(width: 8),
+                Text(context.l10n.pleaseAuthenticateWithService('Asana')),
+              ],
+            ),
+            backgroundColor: Colors.orange,
+            duration: const Duration(seconds: 4),
+          ),
+        );
+      }
+      return;
+    }
+
+    // Show loading state
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Row(
+            children: [
+              const SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Text(context.l10n.addingToService('Asana')),
+            ],
+          ),
+          backgroundColor: Colors.blue,
+          duration: const Duration(seconds: 3),
+        ),
+      );
+    }
+
+    // Create task in Asana (workspace/project from settings, assignee is current user)
+    final success = await service.createTask(
+      name: widget.actionItem.description,
+      notes: 'From Omi',
+      dueDate: widget.actionItem.dueAt,
+    );
+
+    if (context.mounted) {
+      // Clear the loading snackbar
+      ScaffoldMessenger.of(context).clearSnackBars();
+
+      // Show result
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Row(
+            children: [
+              Icon(success ? Icons.check_circle : Icons.error, color: Colors.white, size: 20),
+              const SizedBox(width: 8),
+              Text(success ? context.l10n.addedToService('Asana') : context.l10n.failedToAddToService('Asana')),
+            ],
+          ),
+          backgroundColor: success ? Colors.green : Colors.red,
+          duration: const Duration(seconds: 3),
+        ),
+      );
+
+      // If successful, update the action item with export metadata
+      if (success) {
+        final exportTime = DateTime.now();
+        await updateActionItem(widget.actionItem.id, exported: true, exportDate: exportTime, exportPlatform: 'asana');
+
+        // Track action item export
+        PlatformManager.instance.analytics.actionItemExported(
+          actionItemId: widget.actionItem.id,
+          appName: 'Asana',
+          timestamp: exportTime,
+        );
+
+        widget.onRefresh?.call();
+      }
+    }
+  }
+
+  Future<void> _handleGoogleTasksExport(BuildContext context) async {
+    HapticFeedback.mediumImpact();
+
+    final service = GoogleTasksService();
+
+    // Check if already exported
+    if (widget.actionItem.exported) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Row(
+              children: [
+                const Icon(Icons.check_circle, color: Colors.white, size: 20),
+                const SizedBox(width: 8),
+                Text(context.l10n.alreadyExportedTo(widget.actionItem.exportPlatform ?? context.l10n.anotherPlatform)),
+              ],
+            ),
+            backgroundColor: Colors.orange,
+            duration: const Duration(seconds: 2),
+          ),
+        );
+      }
+      return;
+    }
+
+    // Check if authenticated
+    if (!service.isAuthenticated) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Row(
+              children: [
+                const Icon(Icons.error, color: Colors.white, size: 20),
+                const SizedBox(width: 8),
+                Text(context.l10n.pleaseAuthenticateWithService('Google Tasks')),
+              ],
+            ),
+            backgroundColor: Colors.orange,
+            duration: const Duration(seconds: 4),
+          ),
+        );
+      }
+      return;
+    }
+
+    // Show loading state
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Row(
+            children: [
+              const SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Text(context.l10n.addingToService('Google Tasks')),
+            ],
+          ),
+          backgroundColor: Colors.blue,
+          duration: const Duration(seconds: 3),
+        ),
+      );
+    }
+
+    // Create task in Google Tasks
+    final success = await service.createTask(
+      title: widget.actionItem.description,
+      notes: 'From Omi',
+      dueDate: widget.actionItem.dueAt,
+    );
+
+    if (context.mounted) {
+      // Clear the loading snackbar
+      ScaffoldMessenger.of(context).clearSnackBars();
+
+      // Show result
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Row(
+            children: [
+              Icon(success ? Icons.check_circle : Icons.error, color: Colors.white, size: 20),
+              const SizedBox(width: 8),
+              Text(
+                success
+                    ? context.l10n.addedToService('Google Tasks')
+                    : context.l10n.failedToAddToService('Google Tasks'),
+              ),
+            ],
+          ),
+          backgroundColor: success ? Colors.green : Colors.red,
+          duration: const Duration(seconds: 3),
+        ),
+      );
+
+      // If successful, update the action item with export metadata
+      if (success) {
+        final exportTime = DateTime.now();
+        await updateActionItem(
+          widget.actionItem.id,
+          exported: true,
+          exportDate: exportTime,
+          exportPlatform: 'google_tasks',
+        );
+
+        // Track action item export
+        PlatformManager.instance.analytics.actionItemExported(
+          actionItemId: widget.actionItem.id,
+          appName: 'Google Tasks',
+          timestamp: exportTime,
+        );
+
+        widget.onRefresh?.call();
+      }
+    }
+  }
+
+  Future<void> _handleClickUpExport(BuildContext context) async {
+    HapticFeedback.mediumImpact();
+
+    final service = ClickUpService();
+
+    // Check if authenticated
+    if (!service.isAuthenticated) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Row(
+              children: [
+                const Icon(Icons.error, color: Colors.white, size: 20),
+                const SizedBox(width: 8),
+                Text(context.l10n.pleaseAuthenticateWithService('ClickUp')),
+              ],
+            ),
+            backgroundColor: Colors.orange,
+            duration: const Duration(seconds: 4),
+          ),
+        );
+      }
+      return;
+    }
+
+    // Show loading state
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Row(
+            children: [
+              const SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Text(context.l10n.addingToService('ClickUp')),
+            ],
+          ),
+          backgroundColor: Colors.blue,
+          duration: const Duration(seconds: 3),
+        ),
+      );
+    }
+
+    // Create task in ClickUp
+    final success = await service.createTask(
+      name: widget.actionItem.description,
+      description: 'From Omi',
+      dueDate: widget.actionItem.dueAt,
+    );
+
+    if (context.mounted) {
+      // Clear the loading snackbar
+      ScaffoldMessenger.of(context).clearSnackBars();
+
+      // Show result
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Row(
+            children: [
+              Icon(success ? Icons.check_circle : Icons.error, color: Colors.white, size: 20),
+              const SizedBox(width: 8),
+              Text(success ? context.l10n.addedToService('ClickUp') : context.l10n.failedToAddToService('ClickUp')),
+            ],
+          ),
+          backgroundColor: success ? Colors.green : Colors.red,
+          duration: const Duration(seconds: 3),
+        ),
+      );
+
+      // If successful, update the action item with export metadata
+      if (success) {
+        final exportTime = DateTime.now();
+        await updateActionItem(widget.actionItem.id, exported: true, exportDate: exportTime, exportPlatform: 'clickup');
+
+        // Track action item export
+        PlatformManager.instance.analytics.actionItemExported(
+          actionItemId: widget.actionItem.id,
+          appName: 'ClickUp',
+          timestamp: exportTime,
+        );
+
+        widget.onRefresh?.call();
+      }
+    }
+  }
+
   Future<void> _handleAppleRemindersExport(BuildContext context) async {
     if (!PlatformService.isApple) return;
 
     HapticFeedback.mediumImpact();
 
     final service = AppleRemindersService();
-    final isAlreadyExported = widget.exportedToAppleReminders?.contains(widget.actionItem.description) ?? false;
 
-    if (isAlreadyExported) {
-      // Show message that it's already exported
+    // Check if already exported
+    if (widget.actionItem.exported) {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
+          SnackBar(
             content: Row(
               children: [
-                Icon(Icons.check_circle, color: Colors.white, size: 20),
-                SizedBox(width: 8),
-                Text('Already added to Apple Reminders'),
+                const Icon(Icons.check_circle, color: Colors.white, size: 20),
+                const SizedBox(width: 8),
+                Text(context.l10n.alreadyExportedTo(widget.actionItem.exportPlatform ?? context.l10n.anotherPlatform)),
               ],
             ),
             backgroundColor: Colors.orange,
-            duration: Duration(seconds: 2),
+            duration: const Duration(seconds: 2),
           ),
         );
       }
@@ -283,9 +804,9 @@ class _ActionItemTileWidgetState extends State<ActionItemTileWidget> {
             SnackBar(
               content: Row(
                 children: [
-                  Icon(Icons.error, color: Colors.white, size: 20),
+                  const Icon(Icons.error, color: Colors.white, size: 20),
                   const SizedBox(width: 8),
-                  Text('Permission denied for Apple Reminders'),
+                  Text(context.l10n.permissionDeniedForAppleReminders),
                 ],
               ),
               backgroundColor: Colors.red,
@@ -303,7 +824,7 @@ class _ActionItemTileWidgetState extends State<ActionItemTileWidget> {
         SnackBar(
           content: Row(
             children: [
-              SizedBox(
+              const SizedBox(
                 width: 16,
                 height: 16,
                 child: CircularProgressIndicator(
@@ -312,7 +833,7 @@ class _ActionItemTileWidgetState extends State<ActionItemTileWidget> {
                 ),
               ),
               const SizedBox(width: 12),
-              Text('Adding to Apple Reminders...'),
+              Text(context.l10n.addingToService('Apple Reminders')),
             ],
           ),
           backgroundColor: Colors.blue,
@@ -321,13 +842,14 @@ class _ActionItemTileWidgetState extends State<ActionItemTileWidget> {
       );
     }
 
-    // Add to Apple Reminders
-    final success = await service.addReminder(
+    // Add to Apple Reminders — now returns calendarItemIdentifier
+    final calendarItemId = await service.addReminder(
       title: widget.actionItem.description,
       notes: 'From Omi',
       dueDate: widget.actionItem.dueAt,
-      listName: 'Reminders',
     );
+
+    final success = calendarItemId != null;
 
     if (context.mounted) {
       // Clear the loading snackbar
@@ -340,7 +862,11 @@ class _ActionItemTileWidgetState extends State<ActionItemTileWidget> {
             children: [
               Icon(success ? Icons.check_circle : Icons.error, color: Colors.white, size: 20),
               const SizedBox(width: 8),
-              Text(success ? 'Added to Apple Reminders' : 'Failed to add to Reminders'),
+              Text(
+                success
+                    ? context.l10n.addedToService('Apple Reminders')
+                    : context.l10n.failedToAddToService('Reminders'),
+              ),
             ],
           ),
           backgroundColor: success ? Colors.green : Colors.red,
@@ -348,9 +874,25 @@ class _ActionItemTileWidgetState extends State<ActionItemTileWidget> {
         ),
       );
 
-      // If successful, update the exported list
+      // If successful, update the action item with export metadata + apple_reminder_id
       if (success) {
-        widget.onExportedToAppleReminders?.call();
+        final exportTime = DateTime.now();
+        await updateActionItem(
+          widget.actionItem.id,
+          exported: true,
+          exportDate: exportTime,
+          exportPlatform: 'apple_reminders',
+          appleReminderId: calendarItemId,
+        );
+
+        // Track action item export
+        PlatformManager.instance.analytics.actionItemExported(
+          actionItemId: widget.actionItem.id,
+          appName: 'Apple Reminders',
+          timestamp: exportTime,
+        );
+
+        widget.onRefresh?.call();
       }
     }
   }
@@ -360,15 +902,10 @@ class _ActionItemTileWidgetState extends State<ActionItemTileWidget> {
     return Card(
       elevation: 0,
       margin: EdgeInsets.zero,
-      color: widget.isSelected ? Colors.deepPurpleAccent.withOpacity(0.1) : const Color(0xFF1F1F25),
+      color: Colors.transparent,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(16),
-        side: BorderSide(
-          color: widget.isSelected
-              ? Colors.deepPurpleAccent.withOpacity(0.5)
-              : (widget.actionItem.completed ? Colors.grey.withOpacity(0.2) : Colors.transparent),
-          width: widget.isSelected ? 2 : 1,
-        ),
+        side: BorderSide(color: Colors.transparent, width: 0),
       ),
       clipBehavior: Clip.hardEdge,
       child: InkWell(
@@ -376,10 +913,11 @@ class _ActionItemTileWidgetState extends State<ActionItemTileWidget> {
         onTap: widget.isSelectionMode ? widget.onSelectionToggle : () => _showEditSheet(context),
         onLongPress: widget.onLongPress,
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+          padding: const EdgeInsets.fromLTRB(4, 12, 4, 12),
           child: Stack(
             children: [
               Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   // Selection checkbox when in selection mode
                   if (widget.isSelectionMode)
@@ -396,41 +934,34 @@ class _ActionItemTileWidgetState extends State<ActionItemTileWidget> {
                           ),
                           color: widget.isSelected ? Colors.deepPurpleAccent : Colors.transparent,
                         ),
-                        child: widget.isSelected
-                            ? const Icon(
-                                Icons.check,
-                                color: Colors.white,
-                                size: 16,
-                              )
-                            : null,
+                        child: widget.isSelected ? const Icon(Icons.check, color: Colors.white, size: 16) : null,
                       ),
                     )
                   // Completion checkbox when not in selection mode
                   else
                     GestureDetector(
                       onTap: _handleToggle,
-                      child: Container(
-                        width: 24,
-                        height: 24,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          border: Border.all(
+                      child: Padding(
+                        padding: const EdgeInsets.only(top: 5),
+                        child: Container(
+                          width: 24,
+                          height: 24,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            border: Border.all(
+                              color: (widget.actionItem.completed || _isAnimating)
+                                  ? Colors.deepPurpleAccent
+                                  : Colors.grey.shade600,
+                              width: 2,
+                            ),
                             color: (widget.actionItem.completed || _isAnimating)
                                 ? Colors.deepPurpleAccent
-                                : Colors.grey.shade600,
-                            width: 2,
+                                : Colors.transparent,
                           ),
-                          color: (widget.actionItem.completed || _isAnimating)
-                              ? Colors.deepPurpleAccent
-                              : Colors.transparent,
+                          child: (widget.actionItem.completed || _isAnimating)
+                              ? const Icon(Icons.check, color: Colors.white, size: 16)
+                              : null,
                         ),
-                        child: (widget.actionItem.completed || _isAnimating)
-                            ? const Icon(
-                                Icons.check,
-                                color: Colors.white,
-                                size: 16,
-                              )
-                            : null,
                       ),
                     ),
                   const SizedBox(width: 16),
@@ -450,8 +981,9 @@ class _ActionItemTileWidgetState extends State<ActionItemTileWidget> {
                                       color: (widget.actionItem.completed || _isAnimating)
                                           ? Colors.grey.shade400
                                           : Colors.white,
-                                      fontSize: 16,
+                                      fontSize: 15,
                                       fontWeight: FontWeight.w400,
+                                      height: 1.5,
                                       decoration: (widget.actionItem.completed || _isAnimating)
                                           ? TextDecoration.lineThrough
                                           : null,
@@ -463,27 +995,23 @@ class _ActionItemTileWidgetState extends State<ActionItemTileWidget> {
                             ),
                           ],
                         ),
-                        if (widget.actionItem.dueAt != null) ...[
-                          const SizedBox(height: 6),
-                          _buildDueDateChip(),
-                        ],
+                        if (widget.actionItem.dueAt != null) ...[const SizedBox(height: 6), _buildDueDateChip()],
                       ],
                     ),
                   ),
-                  // Apple Reminders icon (only show on Apple platforms)
-                  if (PlatformService.isApple) ...[
-                    const SizedBox(width: 12),
-                    _buildAppleRemindersIcon(context),
-                  ],
+                  // Task export icon
+                  const SizedBox(width: 12),
+                  _buildTaskExportIcon(context),
                 ],
               ),
               if (widget.actionItem.isLocked)
                 Positioned.fill(
                   child: BackdropFilter(
-                    filter: ImageFilter.blur(sigmaX: 3.0, sigmaY: 3.0),
+                    filter: ImageFilter.blur(sigmaX: 2.0, sigmaY: 2.0),
                     child: GestureDetector(
                       onTap: () {
-                        MixpanelManager().paywallOpened('Action Item');
+                        if (!context.read<UsageProvider>().showSubscriptionUI) return;
+                        PlatformManager.instance.analytics.paywallOpened('Action Item');
                         routeToPage(context, const UsagePage(showUpgradeDialog: true));
                         return;
                       },
@@ -493,14 +1021,12 @@ class _ActionItemTileWidgetState extends State<ActionItemTileWidget> {
                           color: Colors.black.withValues(alpha: 0.01),
                           borderRadius: const BorderRadius.all(Radius.circular(8)),
                         ),
-                        child: const Text(
-                          'Upgrade to unlimited',
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 16,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
+                        child: context.watch<UsageProvider>().showSubscriptionUI
+                            ? Text(
+                                context.l10n.upgradeToUnlimited,
+                                style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
+                              )
+                            : const SizedBox.shrink(),
                       ),
                     ),
                   ),

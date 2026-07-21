@@ -1,9 +1,10 @@
+import 'package:omi/utils/platform/platform_manager.dart';
 import 'package:flutter/material.dart';
+
+import 'package:omi/backend/http/api/users.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/pages/home/page.dart';
-import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/other/temp.dart';
-
 import 'device_onboarding_page.dart';
 
 class DeviceOnboardingWrapper extends StatefulWidget {
@@ -15,18 +16,12 @@ class DeviceOnboardingWrapper extends StatefulWidget {
 
 class _DeviceOnboardingWrapperState extends State<DeviceOnboardingWrapper> with TickerProviderStateMixin {
   late TabController _controller;
-  int _currentSlide = 0;
   static const int _totalSlides = 5;
 
   @override
   void initState() {
     super.initState();
     _controller = TabController(length: _totalSlides, vsync: this);
-    _controller.addListener(() {
-      setState(() {
-        _currentSlide = _controller.index;
-      });
-    });
   }
 
   @override
@@ -50,7 +45,10 @@ class _DeviceOnboardingWrapperState extends State<DeviceOnboardingWrapper> with 
   void _completeOnboarding() {
     // Mark onboarding as completed and go to homepage
     SharedPreferencesUtil().onboardingCompleted = true;
-    MixpanelManager().onboardingStepCompleted('Device Onboarding Completed');
+    SharedPreferencesUtil().permissionsCompleted = true;
+    updateUserOnboardingState(completed: true);
+    PlatformManager.instance.analytics.onboardingStepCompleted('Device Onboarding Completed');
+    PaintingBinding.instance.imageCache.clear();
     routeToPage(context, const HomePageWrapper(), replace: true);
   }
 
@@ -69,7 +67,7 @@ class _DeviceOnboardingWrapperState extends State<DeviceOnboardingWrapper> with 
               isFirstSlide: i == 0,
               isLastSlide: i == _totalSlides - 1,
               onNext: () {
-                MixpanelManager().onboardingStepCompleted('Device Onboarding Slide ${i + 1}');
+                PlatformManager.instance.analytics.onboardingStepCompleted('Device Onboarding Slide ${i + 1}');
                 if (i == _totalSlides - 1) {
                   // Last slide, complete onboarding
                   _completeOnboarding();

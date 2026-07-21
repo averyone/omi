@@ -5,34 +5,45 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:flutter_sound/flutter_sound.dart';
-import 'package:omi/backend/http/shared.dart';
+
 import 'package:omi/services/connectivity_service.dart';
 import 'package:omi/services/devices.dart';
+import 'package:omi/services/mic/mic_arbiter.dart';
+import 'package:omi/services/mic/native_mic_recorder_service.dart';
 import 'package:omi/services/sockets.dart';
 import 'package:omi/services/wals.dart';
-import 'package:flutter/services.dart';
-import 'package:omi/utils/platform/platform_service.dart';
+import 'package:omi/utils/logger.dart';
 
 class ServiceManager {
   late IMicRecorderService _mic;
-  late IDeviceService _device;
+  late IMicRecorderService _phoneMic;
+  late DeviceService _device;
   late ISocketService _socket;
   late IWalService _wal;
-  late ISystemAudioRecorderService _systemAudio;
-
   static ServiceManager? _instance;
 
   static ServiceManager _create() {
     ServiceManager sm = ServiceManager();
-    sm._mic = MicRecorderBackgroundService(
-      runner: BackgroundService(),
+    final micArbiter = MicArbiter();
+    sm._mic = ArbitratedMic(
+      inner: MicRecorderBackgroundService(runner: BackgroundService()),
+      arbiter: micArbiter,
+      owner: 'mic',
     );
+    // Conversation capture uses the native recorder on iOS (AVAudioEngine) and
+    // Android (AudioRecord); chat voice memos and the speech profile stay on the
+    // flutter_sound path via [mic]. The shared arbiter keeps the two stacks from
+    // contending for the microphone.
+    sm._phoneMic = (Platform.isIOS || Platform.isAndroid)
+        ? ArbitratedMic(
+            inner: NativeMicRecorderService(),
+            arbiter: micArbiter,
+            owner: 'conversation',
+          )
+        : sm._mic;
     sm._device = DeviceService();
     sm._socket = SocketServicePool();
     sm._wal = WalService();
-    if (PlatformService.isDesktop) {
-      sm._systemAudio = DesktopSystemAudioRecorderService();
-    }
 
     return sm;
   }
@@ -47,18 +58,15 @@ class ServiceManager {
 
   IMicRecorderService get mic => _mic;
 
-  IDeviceService get device => _device;
+  /// The recorder for conversation capture: native on iOS and Android,
+  /// flutter_sound elsewhere. Chat voice memos and speech profile keep using [mic].
+  IMicRecorderService get phoneMic => _phoneMic;
+
+  DeviceService get device => _device;
 
   ISocketService get socket => _socket;
 
   IWalService get wal => _wal;
-
-  ISystemAudioRecorderService get systemAudio {
-    if (PlatformService.isMobile) {
-      throw Exception("System audio recording is only available on macOS and Windows");
-    }
-    return _systemAudio;
-  }
 
   static Future<void> init() async {
     if (_instance != null) {
@@ -71,27 +79,20 @@ class ServiceManager {
   Future<void> start() async {
     _device.start();
     _wal.start();
-    if (Platform.isMacOS) {
-      // TODO: Decide if system audio should start automatically or be user-initiated
-      // await _systemAudio.start();
-    }
   }
 
   void deinit() async {
     ConnectivityService().dispose();
     await _wal.stop();
     _mic.stop();
-    _device.stop();
-    if (Platform.isMacOS) {
-      _systemAudio.stop();
+    if (!identical(_phoneMic, _mic)) {
+      _phoneMic.stop();
     }
+    _device.stop();
   }
 }
 
-enum BackgroundServiceStatus {
-  initiated,
-  running,
-}
+enum BackgroundServiceStatus { initiated, running }
 
 @pragma('vm:entry-point')
 Future<bool> onIosBackground(ServiceInstance service) async {
@@ -106,15 +107,22 @@ Future onStart(ServiceInstance service) async {
   MicRecorderService? recorder;
   service.on('recorder.start').listen((event) async {
     recorder = MicRecorderService(isInBG: Platform.isAndroid ? true : false);
-    recorder?.start(onByteReceived: (bytes) {
-      Uint8List audioBytes = bytes;
-      List<dynamic> audioBytesList = audioBytes.toList();
-      service.invoke("recorder.ui.audioBytes", {"data": audioBytesList});
-    }, onStop: () {
-      service.invoke("recorder.ui.stateUpdate", {"state": 'stopped'});
-    }, onRecording: () {
-      service.invoke("recorder.ui.stateUpdate", {"state": 'recording'});
-    });
+    recorder?.start(
+      onByteReceived: (bytes) {
+        Uint8List audioBytes = bytes;
+        List<dynamic> audioBytesList = audioBytes.toList();
+        service.invoke("recorder.ui.audioBytes", {"data": audioBytesList});
+      },
+      onStop: () {
+        service.invoke("recorder.ui.stateUpdate", {"state": 'stopped'});
+      },
+      onRecording: () {
+        service.invoke("recorder.ui.stateUpdate", {"state": 'recording'});
+      },
+      onStalled: () {
+        service.invoke("recorder.ui.stalled");
+      },
+    );
   });
 
   service.on('recorder.stop').listen((event) async {
@@ -197,7 +205,8 @@ class BackgroundService {
   }
 
   void stop() {
-    debugPrint("invoke stop");
+    Logger.debug("invoke stop");
+    if (_status == null) return;
     _service.invoke("stop");
   }
 
@@ -211,11 +220,18 @@ class BackgroundService {
     Function()? onRecording,
     Function()? onStop,
     Function()? onInitializing,
+    Function()? onStalled,
   }) {
     StreamSubscription? recordAudioByteStream = _service.on('recorder.ui.audioBytes').listen((event) {
       Uint8List bytes = Uint8List.fromList(event!['data'].cast<int>());
       onByteReceived(bytes);
     });
+    StreamSubscription? recordStalledStream;
+    if (onStalled != null) {
+      recordStalledStream = _service.on('recorder.ui.stalled').listen((event) {
+        onStalled();
+      });
+    }
     StreamSubscription? recordStateStream;
     recordStateStream = _service.on('recorder.ui.stateUpdate').listen((event) {
       if (event!['state'] == 'recording') {
@@ -229,6 +245,7 @@ class BackgroundService {
       } else if (event['state'] == 'stopped') {
         // Close streams
         recordAudioByteStream.cancel();
+        recordStalledStream?.cancel();
         recordStateStream?.cancel();
 
         // Callback
@@ -243,15 +260,12 @@ class BackgroundService {
   }
 
   void stopRecorder() {
+    if (_status == null) return;
     _service.invoke("recorder.stop");
   }
 }
 
-enum RecorderServiceStatus {
-  initialising,
-  recording,
-  stop,
-}
+enum RecorderServiceStatus { initialising, recording, stop }
 
 abstract class IMicRecorderService {
   Future<void> start({
@@ -259,7 +273,26 @@ abstract class IMicRecorderService {
     Function()? onRecording,
     Function()? onStop,
     Function()? onInitializing,
+    Function()? onStalled,
+    // Fired with began=true/false around an audio-session interruption. Only
+    // NativeMicRecorderService emits it — capture resumes natively; Dart just
+    // mirrors the state.
+    Function(bool began)? onInterruption,
   });
+
+  // Transcribe Later capture: audio is opus-encoded and written to WAL-compatible
+  // .bin files natively (no onByteReceived — nothing streams to Dart). onBatchStalled
+  // fires when the native liveness feed (onBatchProgress) goes silent; onError
+  // forwards non-fatal native failures (e.g. batch_storage_full). Requires the native
+  // recorder (`ServiceManager.phoneMic` on iOS/Android); the flutter_sound
+  // implementations throw UnsupportedError.
+  Future<void> startBatch({
+    Function()? onStop,
+    Function(bool began)? onInterruption,
+    Function()? onBatchStalled,
+    Function(String code, String message)? onError,
+  });
+
   void stop();
 }
 
@@ -276,6 +309,8 @@ class MicRecorderBackgroundService implements IMicRecorderService {
     Function()? onRecording,
     Function()? onStop,
     Function()? onInitializing,
+    Function()? onStalled,
+    Function(bool began)? onInterruption,
   }) async {
     await _runner.ensureRunning();
 
@@ -284,9 +319,20 @@ class MicRecorderBackgroundService implements IMicRecorderService {
       onRecording: onRecording,
       onStop: onStop,
       onInitializing: onInitializing,
+      onStalled: onStalled,
     );
 
     return;
+  }
+
+  @override
+  Future<void> startBatch({
+    Function()? onStop,
+    Function(bool began)? onInterruption,
+    Function()? onBatchStalled,
+    Function(String code, String message)? onError,
+  }) async {
+    throw UnsupportedError('batch capture requires the native recorder');
   }
 
   @override
@@ -296,6 +342,13 @@ class MicRecorderBackgroundService implements IMicRecorderService {
 }
 
 class MicRecorderService implements IMicRecorderService {
+  // Window without a single audio byte that counts as a stall.
+  // Phone mic at 16 kHz/PCM16 emits ~10 buffer events per second; 3 s of silence
+  // is well past any normal jitter and comfortably covers an iOS audio-session
+  // interruption (the OS pauses the engine, bytes stop flowing immediately).
+  static const Duration _stallThreshold = Duration(seconds: 3);
+  static const Duration _stallCheckInterval = Duration(seconds: 1);
+
   RecorderServiceStatus? _status;
 
   late FlutterSoundRecorder _recorder;
@@ -304,8 +357,13 @@ class MicRecorderService implements IMicRecorderService {
   Function(Uint8List bytes)? _onByteReceived;
   Function? _onRecording;
   Function? _onStop;
+  Function? _onStalled;
 
   bool _isInBG = false;
+
+  DateTime? _lastByteAt;
+  Timer? _stallTimer;
+  bool _stallReported = false;
 
   MicRecorderService({bool isInBG = false}) {
     _recorder = FlutterSoundRecorder();
@@ -320,9 +378,13 @@ class MicRecorderService implements IMicRecorderService {
     Function()? onRecording,
     Function()? onStop,
     Function()? onInitializing,
+    Function()? onStalled,
+    Function(bool began)? onInterruption,
   }) async {
     if (_status == RecorderServiceStatus.recording) {
-      throw Exception("Recorder is recording, please stop it before start new recording.");
+      throw Exception(
+        "Recorder is recording, please stop it before start new recording.",
+      );
     }
     if (_status == RecorderServiceStatus.initialising) {
       throw Exception("Recorder is initialising");
@@ -334,6 +396,7 @@ class MicRecorderService implements IMicRecorderService {
     _onByteReceived = onByteReceived;
     _onStop = onStop;
     _onRecording = onRecording;
+    _onStalled = onStalled;
     if (_onRecording != null) {
       _onRecording!();
     }
@@ -349,10 +412,25 @@ class MicRecorderService implements IMicRecorderService {
       sampleRate: 16000,
       bufferSize: 8192,
     );
+    _lastByteAt = DateTime.now();
+    _stallReported = false;
     _controller.stream.listen((buffer) {
-      Uint8List audioBytes = buffer;
+      _lastByteAt = DateTime.now();
+      _stallReported = false;
       if (_onByteReceived != null) {
-        _onByteReceived!(audioBytes);
+        _onByteReceived!(buffer);
+      }
+    });
+
+    _stallTimer?.cancel();
+    _stallTimer = Timer.periodic(_stallCheckInterval, (_) {
+      // The stream going silent for longer than the threshold means the native
+      // audio engine has stopped delivering bytes — on iOS this happens when
+      // AVAudioSession is interrupted (incoming call) and is not resumed.
+      if (_stallReported || _lastByteAt == null) return;
+      if (DateTime.now().difference(_lastByteAt!) >= _stallThreshold) {
+        _stallReported = true;
+        _onStalled?.call();
       }
     });
 
@@ -361,8 +439,24 @@ class MicRecorderService implements IMicRecorderService {
   }
 
   @override
+  Future<void> startBatch({
+    Function()? onStop,
+    Function(bool began)? onInterruption,
+    Function()? onBatchStalled,
+    Function(String code, String message)? onError,
+  }) async {
+    throw UnsupportedError('batch capture requires the native recorder');
+  }
+
+  @override
   void stop() {
+    _stallTimer?.cancel();
+    _stallTimer = null;
+    _lastByteAt = null;
+    _stallReported = false;
+
     _recorder.stopRecorder();
+    _recorder.closeRecorder();
     _controller.close();
 
     // callback
@@ -374,310 +468,6 @@ class MicRecorderService implements IMicRecorderService {
     _onByteReceived = null;
     _onStop = null;
     _onRecording = null;
-  }
-}
-
-abstract class ISystemAudioRecorderService {
-  Future<void> start({
-    required Function(Uint8List bytes) onByteReceived,
-    required Function(Map<String, dynamic> format) onFormatReceived,
-    Function()? onRecording,
-    Function()? onStop,
-    Function(String error)? onError,
-    Function(bool wasRecording)? onSystemWillSleep,
-    Function(bool nativeIsRecording)? onSystemDidWake,
-    Function(bool wasRecording)? onScreenDidLock,
-    Function()? onScreenDidUnlock,
-    Function(String reason)? onDisplaySetupInvalid,
-    Function()? onMicrophoneDeviceChanged,
-    Function(String deviceName, double micLevel, double systemAudioLevel)? onMicrophoneStatus,
-  });
-  void stop();
-  // TODO: Add status property
-}
-
-class DesktopSystemAudioRecorderService implements ISystemAudioRecorderService {
-  static const MethodChannel _channel = MethodChannel('screenCapturePlatform');
-  Function(Uint8List bytes)? _onByteReceived;
-  Function(Map<String, dynamic> format)? _onFormatReceived;
-  Function()? _onRecording;
-  Function()? _onStop;
-  Function(String error)? _onError;
-
-  // Sleep/wake event callbacks
-  Function(bool wasRecording)? _onSystemWillSleep;
-  Function(bool nativeIsRecording)? _onSystemDidWake;
-  Function(bool wasRecording)? _onScreenDidLock;
-  Function()? _onScreenDidUnlock;
-  Function(String reason)? _onDisplaySetupInvalid;
-  Function()? _onMicrophoneDeviceChanged;
-  Function(String deviceName, double micLevel, double systemAudioLevel)? _onMicrophoneStatus;
-
-  // To keep track of recording state from Dart's perspective
-  bool _isRecording = false;
-
-  DesktopSystemAudioRecorderService() {
-    _channel.setMethodCallHandler(_handleMethodCall);
-  }
-
-  Future<void> _handleMethodCall(MethodCall call) async {
-    switch (call.method) {
-      case 'audioFrame':
-        if (_onByteReceived != null && call.arguments is Uint8List) {
-          _onByteReceived!(call.arguments);
-        }
-        break;
-      case 'audioFormat':
-        debugPrint("audioFormat: ${call.arguments}");
-        if (_onFormatReceived != null && call.arguments is Map) {
-          final Map<String, dynamic> format = Map<String, dynamic>.from(call.arguments as Map);
-          _onFormatReceived!(format);
-        }
-        break;
-      case 'audioStreamEnded':
-        debugPrint("audioStreamEnded");
-        _isRecording = false;
-        if (_onStop != null) {
-          _onStop!();
-        }
-        _clearCallbacks(); // Clear callbacks after stopping
-        break;
-      case 'captureError':
-      case 'converterError':
-        debugPrint("captureError: ${call.arguments}");
-        _isRecording = false;
-        if (_onError != null && call.arguments is String) {
-          _onError!(call.arguments as String);
-        }
-        if (_onStop != null) {
-          _onStop!(); // Also call onStop if there's an error
-        }
-        _clearCallbacks(); // Clear callbacks after error
-        break;
-      case 'systemWillSleep':
-        await _handleSystemWillSleep(call.arguments);
-        break;
-      case 'systemDidWake':
-        await _handleSystemDidWake(call.arguments);
-        break;
-      case 'screenDidLock':
-        await _handleScreenDidLock(call.arguments);
-        break;
-      case 'screenDidUnlock':
-        await _handleScreenDidUnlock(call.arguments);
-        break;
-      case 'displaySetupInvalid':
-        await _handleDisplaySetupInvalid(call.arguments);
-        break;
-      case 'microphoneDeviceChanged':
-        await _handleMicrophoneDeviceChanged(call.arguments);
-        break;
-      case 'microphoneStatus':
-        if (_onMicrophoneStatus != null && call.arguments is Map) {
-          final args = Map<String, dynamic>.from(call.arguments as Map);
-          final deviceName = args['deviceName'] as String? ?? 'Unknown Device';
-          final micLevel = (args['micLevel'] as num? ?? 0.0).toDouble();
-          final systemAudioLevel = (args['systemAudioLevel'] as num? ?? 0.0).toDouble();
-          _onMicrophoneStatus!(deviceName, micLevel, systemAudioLevel);
-        }
-        break;
-      default:
-        debugPrint('DesktopSystemAudioRecorderService: Unhandled method call: ${call.method}');
-    }
-  }
-
-  void _clearCallbacks() {
-    _onByteReceived = null;
-    _onFormatReceived = null;
-    _onRecording = null;
-    _onStop = null;
-    _onError = null;
-    _onSystemWillSleep = null;
-    _onSystemDidWake = null;
-    _onScreenDidLock = null;
-    _onScreenDidUnlock = null;
-    _onDisplaySetupInvalid = null;
-    _onMicrophoneDeviceChanged = null;
-    _onMicrophoneStatus = null;
-  }
-
-  // Sleep/wake event handlers
-  Future<void> _handleSystemWillSleep(dynamic arguments) async {
-    final args = arguments as Map<String, dynamic>?;
-    final wasRecording = args?['wasRecording'] as bool? ?? false;
-
-    if (_onSystemWillSleep != null) {
-      _onSystemWillSleep!(wasRecording);
-    }
-  }
-
-  Future<void> _handleSystemDidWake(dynamic arguments) async {
-    final args = arguments as Map<String, dynamic>?;
-    final nativeIsRecording = args?['nativeIsRecording'] as bool? ?? false;
-
-    // Update internal state if there's a mismatch
-    if (nativeIsRecording && !_isRecording) {
-      _isRecording = true;
-
-      // Notify that recording is active
-      if (_onRecording != null) {
-        _onRecording!();
-      }
-    } else if (!nativeIsRecording && _isRecording) {
-      _isRecording = false;
-
-      if (_onStop != null) {
-        _onStop!();
-      }
-    }
-
-    if (_onSystemDidWake != null) {
-      _onSystemDidWake!(nativeIsRecording);
-    }
-  }
-
-  Future<void> _handleScreenDidLock(dynamic arguments) async {
-    final args = arguments as Map<String, dynamic>?;
-    final wasRecording = args?['wasRecording'] as bool? ?? false;
-
-    if (_onScreenDidLock != null) {
-      _onScreenDidLock!(wasRecording);
-    }
-  }
-
-  Future<void> _handleScreenDidUnlock(dynamic arguments) async {
-    if (_onScreenDidUnlock != null) {
-      _onScreenDidUnlock!();
-    }
-  }
-
-  Future<void> _handleDisplaySetupInvalid(dynamic arguments) async {
-    final args = arguments as Map<String, dynamic>?;
-    final reason = args?['reason'] as String? ?? 'Unknown reason';
-
-    _isRecording = false;
-
-    if (_onDisplaySetupInvalid != null) {
-      _onDisplaySetupInvalid!(reason);
-    }
-
-    if (_onStop != null) {
-      _onStop!();
-    }
-  }
-
-  Future<void> _handleMicrophoneDeviceChanged(dynamic arguments) async {
-    if (_onMicrophoneDeviceChanged != null) {
-      _onMicrophoneDeviceChanged!();
-    }
-  }
-
-  @override
-  Future<void> start({
-    required Function(Uint8List bytes) onByteReceived,
-    required Function(Map<String, dynamic> format) onFormatReceived,
-    Function()? onRecording,
-    Function()? onStop,
-    Function(String error)? onError,
-    Function(bool wasRecording)? onSystemWillSleep,
-    Function(bool nativeIsRecording)? onSystemDidWake,
-    Function(bool wasRecording)? onScreenDidLock,
-    Function()? onScreenDidUnlock,
-    Function(String reason)? onDisplaySetupInvalid,
-    Function()? onMicrophoneDeviceChanged,
-    Function(String deviceName, double micLevel, double systemAudioLevel)? onMicrophoneStatus,
-  }) async {
-    try {
-      bool nativeIsRecording = await _channel.invokeMethod('isRecording') ?? false;
-
-      if (nativeIsRecording && _isRecording) {
-        onError?.call("Already recording. Please stop the current recording first.");
-        return;
-      } else if (nativeIsRecording && !_isRecording) {
-        // Native is recording but Flutter lost track - resync the state
-        _isRecording = true;
-
-        // Restore callbacks to reconnect with ongoing recording
-        _onByteReceived = onByteReceived;
-        _onFormatReceived = onFormatReceived;
-        _onRecording = onRecording;
-        _onStop = onStop;
-        _onError = onError;
-
-        // Notify that recording is active
-        if (_onRecording != null) {
-          _onRecording!();
-        }
-        return;
-      } else if (!nativeIsRecording && _isRecording) {
-        // Flutter thinks it's recording but native isn't - reset Flutter state
-        _isRecording = false;
-      }
-    } catch (e) {
-      debugPrint("[SystemAudio] Could not check native recording state: $e");
-    }
-
-    if (_isRecording) {
-      // Potentially call onError or throw if already recording
-      onError?.call("Already recording. Please stop the current recording first.");
-      return;
-    }
-
-    // Store the callbacks
-    _onByteReceived = onByteReceived;
-    _onFormatReceived = onFormatReceived;
-    _onRecording = onRecording;
-    _onStop = onStop;
-    _onError = onError;
-    _onSystemWillSleep = onSystemWillSleep;
-    _onSystemDidWake = onSystemDidWake;
-    _onScreenDidLock = onScreenDidLock;
-    _onScreenDidUnlock = onScreenDidUnlock;
-    _onDisplaySetupInvalid = onDisplaySetupInvalid;
-    _onMicrophoneDeviceChanged = onMicrophoneDeviceChanged;
-    _onMicrophoneStatus = onMicrophoneStatus;
-
-    try {
-      await _channel.invokeMethod('start');
-      _isRecording = true;
-      if (_onRecording != null) {
-        _onRecording!();
-      }
-    } catch (e) {
-      debugPrint("Error starting system audio recording: $e");
-      _isRecording = false;
-      if (_onError != null) {
-        _onError!(e.toString());
-      }
-      if (_onStop != null) {
-        _onStop!();
-      }
-      _clearCallbacks();
-    }
-  }
-
-  @override
-  void stop() {
-    if (!_isRecording) {
-      // Optionally, log or call onError if trying to stop when not recording
-      // _onError?.call("Not recording.");
-      // return;
-    }
-    try {
-      _channel.invokeMethod('stop');
-      // _isRecording will be set to false and _onStop called
-      // when 'audioStreamEnded' is received from native code.
-      // If the invokeMethod 'stop' itself fails, we might not get 'audioStreamEnded'.
-    } catch (e) {
-      debugPrint("Error stopping system audio recording: \$e");
-      _isRecording = false;
-      if (_onError != null) {
-        _onError!(e.toString());
-      }
-      if (_onStop != null) {
-        _onStop!();
-      }
-      _clearCallbacks();
-    }
+    _onStalled = null;
   }
 }

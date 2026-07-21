@@ -1,0 +1,202 @@
+name: Build Desktop Release Candidate
+
+on:
+  schedule:
+    # One daily candidate at most. Developers use scripts/omi-main for head.
+    - cron: '17 10 * * *'
+  workflow_dispatch:
+    inputs:
+      release_mode:
+        description: 'Release behavior'
+        required: false
+        default: 'release_now'
+        type: choice
+        options:
+          - release_now
+          - force_release
+          # break_glass additionally bypasses the Desktop Swift source check.
+          # force_release does not: it only overrides the active-release and
+          # no-changes checks. Use this when the source gate itself is broken.
+          - break_glass
+      next_version:
+        description: 'Optional explicit desktop version to tag (for example, 0.12.0)'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  plan-release:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: desktop-release-planner-main
+      cancel-in-progress: false
+    outputs:
+      should_release: ${{ steps.plan.outputs.should_release }}
+      reason: ${{ steps.plan.outputs.reason }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Generate Omi Bot token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.OMI_BOT_APP_ID }}
+          private-key: ${{ secrets.OMI_BOT_PRIVATE_KEY }}
+
+      - name: Plan desktop release
+        id: plan
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RELEASE_MODE: ${{ github.event.inputs.release_mode || 'auto' }}
+        run: |
+          python3 .github/scripts/plan-desktop-release.py \
+            --repository "${{ github.repository }}" \
+            --mode "$RELEASE_MODE"
+
+      - name: Show release plan
+        run: echo "${{ steps.plan.outputs.reason }}"
+
+  tag-release:
+    needs: [plan-release]
+    if: needs.plan-release.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: desktop-auto-release-tag-main
+      cancel-in-progress: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Generate Omi Bot token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.OMI_BOT_APP_ID }}
+          private-key: ${{ secrets.OMI_BOT_PRIVATE_KEY }}
+
+      - name: Recheck desktop release queue before tagging
+        id: recheck
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RELEASE_MODE: ${{ github.event.inputs.release_mode || 'auto' }}
+        run: |
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "Omi Bot token not available; cannot inspect previous release build status."
+            exit 1
+          fi
+
+          python3 .github/scripts/plan-desktop-release.py \
+            --repository "${{ github.repository }}" \
+            --mode "$RELEASE_MODE"
+
+      - name: Compute next version and consolidate changelog
+        if: steps.recheck.outputs.should_release == 'true'
+        id: version
+        env:
+          NEXT_VERSION: ${{ github.event.inputs.next_version || '' }}
+        run: |
+          # Get latest desktop release tag
+          LATEST=$(git tag -l 'v*-macos' | sort -V | tail -1)
+
+          if [ -n "$NEXT_VERSION" ]; then
+            if ! [[ "$NEXT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "next_version must be a semantic version like 0.12.0" >&2
+              exit 1
+            fi
+            VERSION="$NEXT_VERSION"
+            if [ -n "$LATEST" ]; then
+              python3 -c 'import sys; latest=sys.argv[1].removeprefix("v").split("+", 1)[0]; candidate=sys.argv[2]; parse=lambda v: tuple(int(p) for p in v.split(".")); sys.exit(0 if parse(candidate) > parse(latest) else f"next_version {candidate} must be greater than latest desktop version {latest}")' "$LATEST" "$VERSION"
+            fi
+          elif [ -z "$LATEST" ]; then
+            VERSION="0.0.1"
+          else
+            # Strip v prefix and +build-macos suffix  e.g. v0.11.11+11011-macos -> 0.11.11
+            VER=$(echo "$LATEST" | sed -E 's/^v([0-9.]+)\+[0-9]+-macos$/\1/')
+            MAJOR=$(echo "$VER" | cut -d. -f1)
+            MINOR=$(echo "$VER" | cut -d. -f2)
+            PATCH=$(echo "$VER" | cut -d. -f3)
+            PATCH=$((${PATCH:-0} + 1))
+            VERSION="$MAJOR.$MINOR.$PATCH"
+          fi
+
+          # Build number: 0.11.12 -> 11012  (each component * 1000, summed)
+          BUILD_NUMBER=$(echo "$VERSION" | tr '.' '\n' | awk '{s=s*1000+$1}END{print s}')
+          RELEASE_TAG="v${VERSION}+${BUILD_NUMBER}-macos"
+
+          echo "Latest tag : ${LATEST:-none}"
+          echo "New version: $VERSION"
+          echo "New tag    : $RELEASE_TAG"
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+
+          # Consolidate unreleased changelog fragments into a versioned release
+          TODAY=$(date -u +%Y-%m-%d)
+          python3 .github/scripts/desktop-changelog.py consolidate \
+            --version "$VERSION" \
+            --date "$TODAY" \
+            --write
+
+      - name: Commit changelog and create tag
+        if: steps.recheck.outputs.should_release == 'true'
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          RELEASE_TAG="${{ steps.version.outputs.release_tag }}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add desktop/macos/CHANGELOG.json desktop/macos/changelog
+          git commit -m "chore: consolidate changelog for v${VERSION}" || echo "No changelog changes to commit"
+
+          # The planner checked the newest queued releasable desktop source SHA.
+          # Tag this commit so Codemagic receives the consolidated release notes too.
+          # NOTE: commit message must NOT contain [skip ci].
+          git tag "$RELEASE_TAG"
+          git push origin "$RELEASE_TAG"
+
+      - name: Create and auto-merge PR to sync changelog back to main
+        if: steps.recheck.outputs.should_release == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "Omi Bot token not available; cannot auto-merge changelog PR."
+            exit 1
+          fi
+
+          VERSION="${{ steps.version.outputs.version }}"
+          BRANCH="changelog/v${VERSION}"
+
+          git checkout -B "$BRANCH"
+          git push --force-with-lease origin "$BRANCH"
+
+          PR_NUMBER=$(gh pr list \
+            --head "$BRANCH" \
+            --base main \
+            --state open \
+            --json number \
+            --jq '.[0].number')
+
+          if [ -z "$PR_NUMBER" ]; then
+            PR_URL=$(gh pr create \
+              --title "Update desktop changelog for v${VERSION} [skip ci]" \
+              --body "Auto-generated: consolidates unreleased changelog fragments into v${VERSION} and regenerates CHANGELOG.json." \
+              --base main \
+              --head "$BRANCH")
+            PR_NUMBER=$(echo "$PR_URL" | awk -F/ '{print $NF}')
+          fi
+
+          # Merge changelog PR in protected branches:
+          # 1) admin merge if allowed, 2) auto-merge if repo supports it, 3) regular merge if already mergeable.
+          gh pr merge "$PR_NUMBER" --merge --admin || \
+          gh pr merge "$PR_NUMBER" --merge --auto || \
+          gh pr merge "$PR_NUMBER" --merge || \
+          echo "Changelog PR #$PR_NUMBER requires manual merge."

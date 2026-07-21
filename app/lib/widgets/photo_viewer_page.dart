@@ -1,18 +1,18 @@
 import 'dart:convert';
+
 import 'package:flutter/material.dart';
-import 'package:omi/backend/schema/conversation.dart';
+
 import 'package:photo_view/photo_view.dart';
 import 'package:photo_view/photo_view_gallery.dart';
+
+import 'package:omi/backend/schema/conversation.dart';
+import 'package:omi/utils/l10n_extensions.dart';
 
 class PhotoViewerPage extends StatefulWidget {
   final List<ConversationPhoto> photos;
   final int initialIndex;
 
-  const PhotoViewerPage({
-    super.key,
-    required this.photos,
-    required this.initialIndex,
-  });
+  const PhotoViewerPage({super.key, required this.photos, required this.initialIndex});
 
   @override
   State<PhotoViewerPage> createState() => _PhotoViewerPageState();
@@ -63,39 +63,37 @@ class _PhotoViewerPageState extends State<PhotoViewerPage> {
                     imageProvider: MemoryImage(imageBytes),
                     minScale: PhotoViewComputedScale.contained,
                     maxScale: PhotoViewComputedScale.covered * 4,
-                    heroAttributes: PhotoViewHeroAttributes(tag: photo.id ?? index.toString()),
+                    heroAttributes: PhotoViewHeroAttributes(tag: photo.id),
                   );
                 },
                 scrollPhysics: const BouncingScrollPhysics(),
-                backgroundDecoration: const BoxDecoration(
-                  color: Colors.black,
-                ),
+                backgroundDecoration: const BoxDecoration(color: Colors.black),
               ),
             ),
             if (currentPhoto.discarded)
-              const Padding(
-                padding: EdgeInsets.fromLTRB(24, 24, 24, 48),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(24, 24, 24, 48),
                 child: Text(
-                  "This photo was discarded as it was not significant.",
-                  style: TextStyle(color: Colors.white70, fontSize: 16),
+                  context.l10n.photoDiscardedMessage,
+                  style: const TextStyle(color: Colors.white70, fontSize: 16),
                   textAlign: TextAlign.center,
                 ),
               )
             else if (isProcessing)
-              const Padding(
-                padding: EdgeInsets.fromLTRB(24, 24, 24, 48),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(24, 24, 24, 48),
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    SizedBox(
+                    const SizedBox(
                       width: 16,
                       height: 16,
                       child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white70),
                     ),
-                    SizedBox(width: 12),
+                    const SizedBox(width: 12),
                     Text(
-                      "Analyzing...",
-                      style: TextStyle(color: Colors.white70, fontSize: 16),
+                      context.l10n.analyzing,
+                      style: const TextStyle(color: Colors.white70, fontSize: 16),
                       textAlign: TextAlign.center,
                     ),
                   ],
@@ -106,10 +104,7 @@ class _PhotoViewerPageState extends State<PhotoViewerPage> {
                 padding: const EdgeInsets.fromLTRB(24, 24, 24, 48),
                 child: Text(
                   currentPhoto.description!,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 16,
-                  ),
+                  style: const TextStyle(color: Colors.white, fontSize: 16),
                   textAlign: TextAlign.center,
                 ),
               ),

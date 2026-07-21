@@ -45,17 +45,8 @@ class ConversationSyncUtils {
   }
 
   static SyncedConversationPointer _createPointer(ServerConversation conversation, SyncedConversationType type) {
-    final date = DateTime(
-      conversation.createdAt.year,
-      conversation.createdAt.month,
-      conversation.createdAt.day,
-    );
+    final date = DateTime(conversation.createdAt.year, conversation.createdAt.month, conversation.createdAt.day);
 
-    return SyncedConversationPointer(
-      type: type,
-      index: 0,
-      key: date,
-      conversation: conversation,
-    );
+    return SyncedConversationPointer(type: type, index: 0, key: date, conversation: conversation);
   }
 }

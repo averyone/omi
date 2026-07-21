@@ -1,17 +1,20 @@
+// Phase 4.1 SKIPPED — has custom behavior, so not typedef'd here.
+// Person.fromGenerated derives colorIdx from id.hashCode, throws FormatException on
+// missing created_at/updated_at, defaults speechSamplesVersion to 3, and toJson injects
+// color_idx. None of that survives a plain typedef; this file needs manual care.
+
 import 'package:flutter/material.dart';
+import 'package:omi/backend/schema/gen/people_wire.g.dart' as wire;
 
 final List<Color> speakerColors = [
-  Colors.white
-  // Colors.red,
-  // Colors.blue,
-  // Colors.green,
-  // Colors.yellow,
-  // Colors.purple,
-  // Colors.orange,
-  // Colors.pink,
-  // Colors.teal,
-  // Colors.cyan,
-  // Colors.amber,
+  Color(0xFF2D3748), // Dark gray-blue
+  Color(0xFF1E3A5F), // Deep blue
+  Color(0xFF2D4A3E), // Forest green
+  Color(0xFF4A3728), // Brown
+  Color(0xFF3D2E4A), // Purple
+  Color(0xFF4A3A2D), // Tan
+  Color(0xFF2E3D4A), // Steel blue
+  Color(0xFF3A2D2D), // Maroon
 ];
 
 final List<String> speakerImagePath = [
@@ -34,6 +37,8 @@ class Person {
   final DateTime createdAt;
   final DateTime updatedAt;
   final List<String>? speechSamples;
+  final List<String>? speechSampleTranscripts;
+  final int speechSamplesVersion;
   final int? colorIdx;
 
   Person({
@@ -42,28 +47,50 @@ class Person {
     required this.createdAt,
     required this.updatedAt,
     this.speechSamples,
+    this.speechSampleTranscripts,
+    this.speechSamplesVersion = 1,
     this.colorIdx,
   });
 
   factory Person.fromJson(Map<String, dynamic> json) {
+    final generated = wire.GeneratedPerson.fromJson(json);
+    return Person.fromGenerated(generated, colorIdx: json['color_idx'] as int?);
+  }
+
+  factory Person.fromGenerated(wire.GeneratedPerson generated, {int? colorIdx}) {
+    final createdAt = generated.createdAt;
+    final updatedAt = generated.updatedAt;
+    if (createdAt == null) {
+      throw const FormatException('Missing required field: created_at');
+    }
+    if (updatedAt == null) {
+      throw const FormatException('Missing required field: updated_at');
+    }
     return Person(
-      id: json['id'],
-      name: json['name'],
-      createdAt: DateTime.parse(json['created_at']).toLocal(),
-      updatedAt: DateTime.parse(json['updated_at']).toLocal(),
-      speechSamples: json['speech_samples'] != null ? List<String>.from(json['speech_samples']) : [],
-      colorIdx: json['color_idx'] ?? json['id'].hashCode % speakerColors.length,
+      id: generated.id,
+      name: generated.name,
+      createdAt: createdAt,
+      updatedAt: updatedAt,
+      speechSamples: generated.speechSamples,
+      speechSampleTranscripts: generated.speechSampleTranscripts,
+      speechSamplesVersion: generated.speechSamplesVersion,
+      colorIdx: colorIdx ?? generated.id.hashCode % speakerColors.length,
+    );
+  }
+
+  wire.GeneratedPerson toGenerated() {
+    return wire.GeneratedPerson(
+      id: id,
+      name: name,
+      createdAt: createdAt,
+      updatedAt: updatedAt,
+      speechSamples: speechSamples ?? const [],
+      speechSampleTranscripts: speechSampleTranscripts,
+      speechSamplesVersion: speechSamplesVersion,
     );
   }
 
   Map<String, dynamic> toJson() {
-    return {
-      'id': id,
-      'name': name,
-      'created_at': createdAt.toUtc().toIso8601String(),
-      'updated_at': updatedAt.toUtc().toIso8601String(),
-      'speech_samples': speechSamples ?? [],
-      'color_idx': colorIdx,
-    };
+    return {...toGenerated().toJson(), 'color_idx': colorIdx};
   }
 }

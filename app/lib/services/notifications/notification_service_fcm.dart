@@ -1,44 +1,49 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:isolate';
 import 'dart:math';
 import 'dart:ui';
+
+import 'package:flutter/material.dart';
 
 import 'package:awesome_notifications/awesome_notifications.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
-import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_timezone/flutter_timezone.dart';
+
 import 'package:omi/backend/http/api/notifications.dart';
 import 'package:omi/backend/schema/message.dart';
-import 'package:omi/main.dart';
-import 'package:omi/pages/home/page.dart';
-import 'package:intercom_flutter/intercom_flutter.dart';
+import 'package:omi/services/notifications/action_item_notification_handler.dart';
+import 'package:omi/services/notifications/important_conversation_notification_handler.dart';
+import 'package:omi/services/notifications/merge_notification_handler.dart';
 import 'package:omi/services/notifications/notification_interface.dart';
-import 'package:omi/utils/platform/platform_service.dart';
+import 'package:omi/services/voice_playback/omi_voice_playback_service.dart';
+import 'package:omi/utils/analytics/intercom.dart';
+import 'package:omi/utils/logger.dart';
+import 'package:omi/utils/notification_channel_strings.dart';
 
 /// Firebase Cloud Messaging enabled notification service
 /// Supports iOS, Android, macOS, web, and Linux with full FCM functionality
 class _FCMNotificationService implements NotificationInterface {
   _FCMNotificationService._();
 
-  MethodChannel platform = const MethodChannel('com.friend.ios/notifyOnKill');
   final FirebaseMessaging _firebaseMessaging = FirebaseMessaging.instance;
 
-  final channel = NotificationChannel(
-    channelGroupKey: 'channel_group_key',
-    channelKey: 'channel',
-    channelName: 'Omi Notifications',
-    channelDescription: 'Notification channel for Omi',
-    defaultColor: const Color(0xFF9D50DD),
-    ledColor: Colors.white,
-  );
+  // Resolved in initialize() after NotificationChannelStrings.loadAppLocale().
+  late final NotificationChannel channel;
 
   final AwesomeNotifications _awesomeNotifications = AwesomeNotifications();
 
   @override
   Future<void> initialize() async {
+    await NotificationChannelStrings.loadAppLocale();
+    channel = NotificationChannel(
+      channelGroupKey: 'channel_group_key',
+      channelKey: 'channel',
+      channelName: NotificationChannelStrings.omiChannelName,
+      channelDescription: NotificationChannelStrings.omiChannelDescription,
+      defaultColor: const Color(0xFF9D50DD),
+      ledColor: Colors.white,
+    );
     await _initializeAwesomeNotifications();
     // Calling it here because the APNS token can sometimes arrive early or it might take some time (like a few seconds)
     // Reference: https://github.com/firebase/flutterfire/issues/12244#issuecomment-1969286794
@@ -48,32 +53,34 @@ class _FCMNotificationService implements NotificationInterface {
 
   Future<void> _initializeAwesomeNotifications() async {
     bool initialized = await _awesomeNotifications.initialize(
-        // set the icon to null if you want to use the default app icon
-        'resource://drawable/icon',
-        [
-          NotificationChannel(
-            channelGroupKey: 'channel_group_key',
-            channelKey: channel.channelKey,
-            channelName: channel.channelName,
-            channelDescription: channel.channelDescription,
-            defaultColor: const Color(0xFF9D50DD),
-            ledColor: Colors.white,
-          )
-        ],
-        // Channel groups are only visual and are not required
-        channelGroups: [
-          NotificationChannelGroup(
-            channelGroupKey: channel.channelKey!,
-            channelGroupName: channel.channelName!,
-          )
-        ],
-        debug: false);
+      // set the icon to null if you want to use the default app icon
+      'resource://drawable/icon',
+      [
+        NotificationChannel(
+          channelGroupKey: 'channel_group_key',
+          channelKey: channel.channelKey,
+          channelName: channel.channelName,
+          channelDescription: channel.channelDescription,
+          defaultColor: const Color(0xFF9D50DD),
+          ledColor: Colors.white,
+        ),
+      ],
+      // Channel groups are only visual and are not required
+      channelGroups: [
+        NotificationChannelGroup(channelGroupKey: channel.channelKey!, channelGroupName: channel.channelName!),
+      ],
+      debug: false,
+    );
 
-    debugPrint('initializeNotifications: $initialized');
+    Logger.debug('initializeNotifications: $initialized');
+
+    // Reset badge to clear existing badge count if any
+    int badgeCount = await _awesomeNotifications.getGlobalBadgeCounter();
+    if (badgeCount > 0) await _awesomeNotifications.resetGlobalBadge();
   }
 
   @override
-  void showNotification({
+  Future<void> showNotification({
     required int id,
     required String title,
     required String body,
@@ -81,18 +88,26 @@ class _FCMNotificationService implements NotificationInterface {
     bool wakeUpScreen = false,
     NotificationSchedule? schedule,
     NotificationLayout layout = NotificationLayout.Default,
-  }) {
-    _awesomeNotifications.createNotification(
-      content: NotificationContent(
-        id: id,
-        channelKey: channel.channelKey!,
-        actionType: ActionType.Default,
-        title: title,
-        body: body,
-        payload: payload,
-        notificationLayout: layout,
-      ),
-    );
+  }) async {
+    final allowed = await _awesomeNotifications.isNotificationAllowed();
+    if (!allowed) {
+      return;
+    }
+    try {
+      await _awesomeNotifications.createNotification(
+        content: NotificationContent(
+          id: id,
+          channelKey: channel.channelKey!,
+          actionType: ActionType.Default,
+          title: title,
+          body: body,
+          payload: payload,
+          notificationLayout: layout,
+        ),
+      );
+    } catch (e) {
+      Logger.debug('Failed to create notification (channel may be disabled): $e');
+    }
   }
 
   @override
@@ -106,20 +121,7 @@ class _FCMNotificationService implements NotificationInterface {
   }
 
   @override
-  Future<void> register() async {
-    try {
-      if (PlatformService.isDesktop) return;
-      await platform.invokeMethod(
-        'setNotificationOnKillService',
-        {
-          'title': "Your Omi Device Disconnected",
-          'description': "Please keep your app opened to continue using your Omi.",
-        },
-      );
-    } catch (e) {
-      debugPrint('NotifOnKill error: $e');
-    }
-  }
+  Future<void> register() async {}
 
   @override
   Future<String> getTimeZone() async {
@@ -132,20 +134,40 @@ class _FCMNotificationService implements NotificationInterface {
     if (token == null) return;
     String timeZone = await getTimeZone();
     if (FirebaseAuth.instance.currentUser != null && token.isNotEmpty) {
-      await Intercom.instance.sendTokenToIntercom(token);
       await saveFcmTokenServer(token: token, timeZone: timeZone);
+
+      try {
+        await IntercomManager.instance.sendTokenToIntercom(token);
+      } catch (e) {
+        print(e);
+      }
     }
   }
 
   @override
   void saveNotificationToken() async {
-    if (Platform.isIOS) {
-      await _firebaseMessaging.getAPNSToken();
+    try {
+      if (Platform.isIOS) {
+        String? apnsToken;
+        for (int i = 0; i < 10; i++) {
+          apnsToken = await _firebaseMessaging.getAPNSToken();
+          if (apnsToken != null) break;
+          await Future.delayed(const Duration(seconds: 1));
+        }
+
+        if (apnsToken == null) {
+          Logger.debug('APNS token not available yet, will retry on refresh');
+          return;
+        }
+      }
+
+      String? token = await _firebaseMessaging.getToken();
+      await saveFcmToken(token);
+    } catch (e) {
+      Logger.debug('Failed to save notification token: $e');
+    } finally {
+      _firebaseMessaging.onTokenRefresh.listen(saveFcmToken);
     }
-    if (Platform.isMacOS) return;
-    String? token = await _firebaseMessaging.getToken();
-    await saveFcmToken(token);
-    _firebaseMessaging.onTokenRefresh.listen(saveFcmToken);
   }
 
   @override
@@ -161,16 +183,15 @@ class _FCMNotificationService implements NotificationInterface {
     Map<String, String?>? payload,
   }) async {
     var allowed = await _awesomeNotifications.isNotificationAllowed();
-    debugPrint('createNotification: $allowed');
+    Logger.debug('createNotification: $allowed');
     if (!allowed) return;
-    debugPrint('createNotification ~ Creating notification: $title');
+    Logger.debug('createNotification ~ Creating notification: $title');
     showNotification(id: notificationId, title: title, body: body, wakeUpScreen: true, payload: payload);
   }
 
   @override
   void clearNotification(int id) => _awesomeNotifications.cancel(id);
 
-  // FIXME: Causes the different behavior on android and iOS
   bool _shouldShowForegroundNotificationOnFCMMessageReceived() {
     return Platform.isAndroid;
   }
@@ -183,10 +204,40 @@ class _FCMNotificationService implements NotificationInterface {
 
       // Plugin
       if (data.isNotEmpty) {
-        late Map<String, String> payload = <String, String>{};
-        payload.addAll({
-          "navigate_to": data['navigate_to'] ?? "",
-        });
+        final Map<String, String> payload = <String, String>{};
+        final navigateTo = data['navigate_to'];
+        if (navigateTo != null && navigateTo.toString().isNotEmpty) {
+          payload['navigate_to'] = navigateTo.toString();
+        }
+
+        // Handle action item data messages
+        final messageType = data['type'];
+        if (messageType == 'apple_reminders_sync') {
+          // Handled natively by AppDelegate; foreground resume catches missed FCM
+          return;
+        } else if (messageType == 'action_item_reminder') {
+          ActionItemNotificationHandler.handleReminderMessage(data, channel.channelKey!);
+          return;
+        } else if (messageType == 'action_item_update') {
+          ActionItemNotificationHandler.handleUpdateMessage(data, channel.channelKey!);
+          return;
+        } else if (messageType == 'action_item_delete') {
+          ActionItemNotificationHandler.handleDeletionMessage(data);
+          return;
+        } else if (messageType == 'action_item_batch_delete') {
+          ActionItemNotificationHandler.handleBatchDeletionMessage(data);
+          return;
+        } else if (messageType == 'merge_completed') {
+          MergeNotificationHandler.handleMergeCompleted(data, channel.channelKey!, isAppInForeground: true);
+          return;
+        } else if (messageType == 'important_conversation') {
+          ImportantConversationNotificationHandler.handleImportantConversation(
+            data,
+            channel.channelKey!,
+            isAppInForeground: true,
+          );
+          return;
+        }
 
         // plugin, daily summary
         final notificationType = data['notification_type'];
@@ -195,14 +246,18 @@ class _FCMNotificationService implements NotificationInterface {
           _serverMessageStreamController.add(ServerMessage.fromJson(data));
         }
         if (noti != null && _shouldShowForegroundNotificationOnFCMMessageReceived()) {
-          _showForegroundNotification(noti: noti, payload: payload);
+          if (!OmiVoicePlaybackService.instance.isSpeaking) {
+            _showForegroundNotification(noti: noti, payload: payload);
+          }
         }
         return;
       }
 
       // Announcement likes
       if (noti != null && _shouldShowForegroundNotificationOnFCMMessageReceived()) {
-        _showForegroundNotification(noti: noti, layout: NotificationLayout.BigText);
+        if (!OmiVoicePlaybackService.instance.isSpeaking) {
+          _showForegroundNotification(noti: noti, layout: NotificationLayout.BigText);
+        }
         return;
       }
     });
@@ -213,10 +268,12 @@ class _FCMNotificationService implements NotificationInterface {
   @override
   Stream<ServerMessage> get listenForServerMessages => _serverMessageStreamController.stream;
 
-  Future<void> _showForegroundNotification(
-      {required RemoteNotification noti,
-      NotificationLayout layout = NotificationLayout.Default,
-      Map<String, String?>? payload}) async {
+  Future<void> _showForegroundNotification({
+    required RemoteNotification noti,
+    NotificationLayout layout = NotificationLayout.Default,
+    Map<String, String?>? payload,
+  }) async {
+    if (noti.title == null || noti.body == null) return;
     final id = Random().nextInt(10000);
     showNotification(id: id, title: noti.title!, body: noti.body!, layout: layout, payload: payload);
   }

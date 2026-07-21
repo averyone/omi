@@ -1,14 +1,46 @@
 import asyncio
 from datetime import datetime, timezone
-from typing import AsyncGenerator, List, Optional, Any
-from agents import Agent, ModelSettings, Runner, trace
-from agents.mcp import MCPServer, MCPServerStdio
-from agents.model_settings import Reasoning
+from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, TYPE_CHECKING
 
 from models.app import App
-from models.chat import Message, ChatSession, MessageType
+from models.chat import ChatSession, Message, MessageSender, MessageType
 from utils.retrieval.graph import AsyncStreamingCallback
 from openai.types.responses import ResponseTextDeltaEvent
+import logging
+
+if TYPE_CHECKING:
+    # Minimal stubs for the agents SDK (unavailable during type checking).
+    from typing import ContextManager
+
+    def trace(**kwargs: Any) -> ContextManager[None]: ...
+
+    class Agent:
+        def __init__(self, **kwargs: Any) -> None: ...
+        def as_tool(self, **kwargs: Any) -> Any: ...
+
+    class ModelSettings:
+        def __init__(self, **kwargs: Any) -> None: ...
+
+    class Reasoning:
+        def __init__(self, **kwargs: Any) -> None: ...
+
+    class Runner:
+        @staticmethod
+        def run_streamed(**kwargs: Any) -> Any: ...
+
+    class MCPServer: ...
+
+    class MCPServerStdio:
+        def __init__(self, **kwargs: Any) -> None: ...
+        async def __aenter__(self) -> Any: ...
+        async def __aexit__(self, *args: Any) -> None: ...
+
+else:
+    from agents import Agent, ModelSettings, Runner, trace
+    from agents.mcp import MCPServer, MCPServerStdio
+    from agents.model_settings import Reasoning
+
+logger = logging.getLogger(__name__)
 
 # omi_documentation: dict = get_github_docs_content()
 # omi_documentation_str = "\n\n".join(
@@ -27,7 +59,7 @@ async def run(
     mcp_server: MCPServer,
     uid: str,
     messages: List[Message],
-    respond: callable,
+    respond: Callable[[str], None],
     plugin: Optional[App] = None,
     stream_callback: Optional[AsyncStreamingCallback] = None,
 ):
@@ -52,8 +84,8 @@ async def run(
         ],
     )
 
-    messages = [{"role": "assistant" if m.sender.value == "ai" else "user", "content": m.text} for m in messages]
-    result = Runner.run_streamed(starting_agent=omi_agent, input=messages)
+    agent_messages = [{"role": "assistant" if m.sender.value == "ai" else "user", "content": m.text} for m in messages]
+    result = Runner.run_streamed(starting_agent=omi_agent, input=agent_messages)
     respond(result.final_output)
 
     async for event in result.stream_events():
@@ -61,7 +93,7 @@ async def run(
             if stream_callback:
                 # Remove "data: " prefix if present
                 delta = event.data.delta
-                if isinstance(delta, str) and delta.startswith("data: "):
+                if delta.startswith("data: "):
                     delta = delta[len("data: ") :]
                 await stream_callback.put_data(delta)
 
@@ -71,10 +103,10 @@ async def execute_agent_chat_stream(
     messages: List[Message],
     app: Optional[App] = None,
     cited: Optional[bool] = False,
-    callback_data: dict = {},
+    callback_data: Dict[str, Any] = {},
     chat_session: Optional[ChatSession] = None,
-) -> AsyncGenerator[str, None]:
-    print("execute_agent_chat_stream app: ", app.id if app else "<none>")
+) -> AsyncGenerator[Optional[str], None]:
+    logger.info(f'execute_agent_chat_stream app:  {app.id if app else "<none>"}')
     callback = AsyncStreamingCallback()
 
     async with MCPServerStdio(
@@ -97,8 +129,7 @@ async def execute_agent_chat_stream(
             try:
                 chunk = await callback.queue.get()
                 if chunk:
-                    # Remove "data: " prefix if present
-                    if isinstance(chunk, str) and chunk.startswith("data: "):
+                    if chunk.startswith("data: "):
                         chunk = chunk[len("data: ") :]
                     yield chunk
                 else:
@@ -124,13 +155,21 @@ async def send_single_message():
             await run(
                 server,
                 "viUv7GtdoHXbK1UBCDlPuTDuPgJ2",
-                "What do you know about me?",
-                lambda x: print(x),
+                [
+                    Message(
+                        id="0",
+                        sender=MessageSender.human,
+                        type=MessageType.text,
+                        text="What do you know about me?",
+                        created_at=datetime.now(timezone.utc),
+                    )
+                ],
+                lambda x: logger.info(x),
             )
 
 
 async def interactive_chat_stream():
-    print("Starting interactive chat with Omi Agent. Type 'exit' to quit.")
+    logger.info("Starting interactive chat with Omi Agent. Type 'exit' to quit.")
     async with MCPServerStdio(
         cache_tools_list=True,
         params={"command": "uvx", "args": ["mcp-server-omi", "-v"]},
@@ -140,13 +179,21 @@ async def interactive_chat_stream():
             if user_input.lower() == "exit":
                 break
 
-            print("\nOmi: ", end="", flush=True)
+            logger.info("\nOmi: ")
 
             with trace(workflow_name="Omi Agent"):
                 await run(
                     server,
                     "viUv7GtdoHXbK1UBCDlPuTDuPgJ2",
-                    user_input,
+                    [
+                        Message(
+                            id="0",
+                            sender=MessageSender.human,
+                            type=MessageType.text,
+                            text=user_input,
+                            created_at=datetime.now(timezone.utc),
+                        )
+                    ],
                     lambda x: None,  # Response is streamed in real-time
                 )
 
@@ -155,35 +202,35 @@ if __name__ == "__main__":
     messages = [
         Message(
             id="0",
-            sender="human",
+            sender=MessageSender.human,
             type=MessageType.text,
             text="Who was Napoleon?",
             created_at=datetime.now(timezone.utc),
         ),
         Message(
             id="1",
-            sender="ai",
+            sender=MessageSender.ai,
             type=MessageType.text,
             text="Napoleon Bonaparte was a French military leader and emperor who rose to prominence during the French Revolution and led several successful campaigns during the Revolutionary Wars. He became Emperor of the French from 1804 until 1814, and again in 1815 during the Hundred Days.",
             created_at=datetime.now(timezone.utc),
         ),
         Message(
             id="2",
-            sender="human",
+            sender=MessageSender.human,
             type=MessageType.text,
             text="What were some of his most significant achievements?",
             created_at=datetime.now(timezone.utc),
         ),
         Message(
             id="3",
-            sender="ai",
+            sender=MessageSender.ai,
             type=MessageType.text,
             text="Some of Napoleon's most significant achievements include the Napoleonic Code, which influenced legal systems worldwide, his military reforms, and his role in spreading revolutionary ideals across Europe. He also reorganized the French education system and centralized the administrative structure of France.",
             created_at=datetime.now(timezone.utc),
         ),
         Message(
             id="4",
-            sender="human",
+            sender=MessageSender.human,
             type=MessageType.text,
             text="How did his reforms impact Europe after his defeat?",
             created_at=datetime.now(timezone.utc),
@@ -193,7 +240,7 @@ if __name__ == "__main__":
     async def main():
         async for chunk in execute_agent_chat_stream(uid="viUv7GtdoHXbK1UBCDlPuTDuPgJ2", messages=messages):
             if chunk:
-                print(chunk, end="", flush=True)
-        print()  # for newline after stream ends
+                logger.info(chunk)
+        logger.info("")  # for newline after stream ends
 
     asyncio.run(main())

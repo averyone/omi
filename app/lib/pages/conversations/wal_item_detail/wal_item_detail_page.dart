@@ -1,16 +1,20 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:font_awesome_flutter/font_awesome_flutter.dart';
+import 'package:omi/utils/alerts/app_snackbar.dart';
+import 'package:omi/utils/l10n_extensions.dart';
+import 'package:omi/utils/logger.dart';
+import 'package:provider/provider.dart';
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/models/playback_state.dart';
 import 'package:omi/providers/sync_provider.dart';
 import 'package:omi/services/wals.dart';
-import 'package:omi/ui/molecules/omi_confirm_dialog.dart';
+import 'package:omi/widgets/omi_confirm_dialog.dart';
 import 'package:omi/utils/device.dart';
 import 'package:omi/utils/other/temp.dart';
 import 'package:omi/utils/other/time_utils.dart';
 import 'package:omi/widgets/waveform_section.dart';
-import 'package:provider/provider.dart';
 
 class WalItemDetailPage extends StatefulWidget {
   final Wal wal;
@@ -24,13 +28,17 @@ class WalItemDetailPage extends StatefulWidget {
 class _WalItemDetailPageState extends State<WalItemDetailPage> {
   List<double>? _waveformData;
   bool _isProcessingWaveform = false;
-  bool _isSharing = false;
   SyncProvider? _syncProvider;
+
+  /// Returns true if WAL is still on device storage (SD card or flash page) and needs transfer
+  bool get _needsTransfer => widget.wal.storage == WalStorage.sdcard || widget.wal.storage == WalStorage.flashPage;
 
   @override
   void initState() {
     super.initState();
-    _generateWaveform();
+    if (!_needsTransfer) {
+      _generateWaveform();
+    }
   }
 
   @override
@@ -82,12 +90,7 @@ class _WalItemDetailPageState extends State<WalItemDetailPage> {
 
   void _showSnackBar(String message, [Color? backgroundColor]) {
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(message),
-          backgroundColor: backgroundColor,
-        ),
-      );
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message), backgroundColor: backgroundColor));
     }
   }
 
@@ -97,7 +100,7 @@ class _WalItemDetailPageState extends State<WalItemDetailPage> {
       appBar: AppBar(
         elevation: 0,
         automaticallyImplyLeading: true,
-        title: Text('Recording Details', style: Theme.of(context).textTheme.titleLarge),
+        title: Text(context.l10n.recordingDetails, style: Theme.of(context).textTheme.titleLarge),
         centerTitle: true,
         actions: [
           IconButton(
@@ -107,135 +110,345 @@ class _WalItemDetailPageState extends State<WalItemDetailPage> {
         ],
       ),
       backgroundColor: Theme.of(context).colorScheme.primary,
-      body: Consumer<SyncProvider>(
-        builder: (context, syncProvider, child) {
-          final playbackState = _getPlaybackState(syncProvider);
-          final isPlaying = syncProvider.isWalPlaying(widget.wal.id);
+      body: _needsTransfer ? _buildDeviceTransferUI() : _buildPlaybackUI(),
+    );
+  }
 
-          return Column(
-            children: [
-              // Title section
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
-                child: Column(
-                  children: [
-                    Text(
-                      dateTimeFormat('dd MMM yyyy', DateTime.fromMillisecondsSinceEpoch(widget.wal.timerStart * 1000)),
-                      style: Theme.of(context).textTheme.titleLarge!.copyWith(
-                            fontSize: 28,
-                            fontWeight: FontWeight.w600,
-                          ),
+  String _formatTransferEta(int seconds) {
+    if (seconds < 60) {
+      return '${seconds}s';
+    } else if (seconds < 3600) {
+      final minutes = seconds ~/ 60;
+      final secs = seconds % 60;
+      return '${minutes}m ${secs}s';
+    } else {
+      final hours = seconds ~/ 3600;
+      final minutes = (seconds % 3600) ~/ 60;
+      return '${hours}h ${minutes}m';
+    }
+  }
+
+  String _getStorageLocationLabel(WalStorage storage, BuildContext context) {
+    switch (storage) {
+      case WalStorage.sdcard:
+        return context.l10n.storageLocationSdCard;
+      case WalStorage.flashPage:
+        return context.l10n.storageLocationLimitlessPendant;
+      case WalStorage.disk:
+        return context.l10n.storageLocationPhone;
+      case WalStorage.mem:
+        return context.l10n.storageLocationPhoneMemory;
+    }
+  }
+
+  Widget _buildDeviceTransferUI() {
+    final isFlashPage = widget.wal.storage == WalStorage.flashPage;
+    final storageLabel =
+        isFlashPage ? context.l10n.storageLocationLimitlessPendant : context.l10n.storageLocationSdCard;
+    final storageIcon = isFlashPage ? Icons.memory : Icons.sd_card;
+    final storageColor = isFlashPage ? Colors.teal : Colors.deepPurpleAccent;
+
+    return Consumer<SyncProvider>(
+      builder: (context, syncProvider, child) {
+        final currentWal = syncProvider.getWalById(widget.wal.id) ?? widget.wal;
+        final isTransferring = currentWal.isSyncing;
+        final transferProgress = syncProvider.walsSyncedProgress;
+        final transferSpeedKBps = currentWal.syncSpeedKBps;
+        final transferEtaSeconds = currentWal.syncEtaSeconds;
+
+        if (currentWal.storage != WalStorage.sdcard && currentWal.storage != WalStorage.flashPage) {
+          // WAL has been transferred, pop back to refresh
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) {
+              Navigator.of(context).pop();
+            }
+          });
+          return const Center(child: CircularProgressIndicator());
+        }
+
+        return Column(
+          children: [
+            // Title section
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+              child: Column(
+                children: [
+                  Text(
+                    dateTimeFormat('dd MMM yyyy', DateTime.fromMillisecondsSinceEpoch(widget.wal.timerStart * 1000)),
+                    style: Theme.of(context).textTheme.titleLarge!.copyWith(fontSize: 28, fontWeight: FontWeight.w600),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    dateTimeFormat('H:mm', DateTime.fromMillisecondsSinceEpoch(widget.wal.timerStart * 1000)),
+                    style: Theme.of(context).textTheme.bodyMedium!.copyWith(
+                          color: Colors.grey.shade400,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w400,
+                        ),
+                  ),
+                  const SizedBox(height: 8),
+                  // Storage notice
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: storageColor.withValues(alpha: 0.15),
+                      borderRadius: BorderRadius.circular(12),
                     ),
-                    const SizedBox(height: 4),
-                    Text(
-                      dateTimeFormat('H:mm', DateTime.fromMillisecondsSinceEpoch(widget.wal.timerStart * 1000)),
-                      style: Theme.of(context).textTheme.bodyMedium!.copyWith(
-                            color: Colors.grey.shade400,
-                            fontSize: 16,
-                            fontWeight: FontWeight.w400,
-                          ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(storageIcon, color: storageColor, size: 14),
+                        const SizedBox(width: 6),
+                        Text(
+                          context.l10n.storedOnDevice(storageLabel),
+                          style: TextStyle(color: storageColor, fontSize: 12, fontWeight: FontWeight.w500),
+                        ),
+                      ],
                     ),
-                    const SizedBox(height: 8),
-                    // Privacy notice
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                      decoration: BoxDecoration(
-                        color: Colors.grey.withOpacity(0.15),
-                        borderRadius: BorderRadius.circular(12),
+                  ),
+                ],
+              ),
+            ),
+
+            // Center content - Transfer UI
+            Expanded(
+              child: Center(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 40),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      // SD Card icon
+                      Container(
+                        width: 120,
+                        height: 120,
+                        decoration: BoxDecoration(
+                          color: Colors.deepPurple.withValues(alpha: 0.1),
+                          shape: BoxShape.circle,
+                        ),
+                        child: Center(
+                          child: Icon(
+                            isTransferring ? Icons.downloading : Icons.sd_card,
+                            size: 56,
+                            color: Colors.deepPurpleAccent,
+                          ),
+                        ),
                       ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(Icons.security, color: Colors.grey.shade400, size: 14),
-                          const SizedBox(width: 6),
-                          Text(
-                            'Private & secure on your device',
-                            style: TextStyle(
-                              color: Colors.grey.shade400,
-                              fontSize: 12,
-                              fontWeight: FontWeight.w500,
+                      const SizedBox(height: 32),
+
+                      // Status text
+                      Text(
+                        isTransferring ? context.l10n.transferring : context.l10n.transferRequired,
+                        style: Theme.of(
+                          context,
+                        ).textTheme.titleLarge!.copyWith(fontSize: 22, fontWeight: FontWeight.w600),
+                      ),
+                      const SizedBox(height: 12),
+                      Text(
+                        isTransferring
+                            ? context.l10n.downloadingAudioFromSdCard
+                            : context.l10n.transferRequiredDescription,
+                        style: Theme.of(
+                          context,
+                        ).textTheme.bodyMedium!.copyWith(color: Colors.grey.shade400, fontSize: 14),
+                        textAlign: TextAlign.center,
+                      ),
+
+                      // Progress indicator
+                      if (isTransferring) ...[
+                        const SizedBox(height: 32),
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(4),
+                          child: LinearProgressIndicator(
+                            value: transferProgress > 0 ? transferProgress : null,
+                            backgroundColor: Colors.grey.shade800,
+                            color: Colors.deepPurpleAccent,
+                            minHeight: 6,
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Text(
+                              '${(transferProgress * 100).toInt()}%',
+                              style: TextStyle(color: Colors.grey.shade400, fontSize: 14, fontWeight: FontWeight.w500),
                             ),
+                            if (transferSpeedKBps != null && transferSpeedKBps > 0) ...[
+                              const SizedBox(width: 16),
+                              Text(
+                                '${transferSpeedKBps.toStringAsFixed(1)} KB/s',
+                                style: TextStyle(color: Colors.grey.shade500, fontSize: 14),
+                              ),
+                            ],
+                          ],
+                        ),
+                        if (transferEtaSeconds != null && transferEtaSeconds > 0) ...[
+                          const SizedBox(height: 8),
+                          Text(
+                            'ETA: ${_formatTransferEta(transferEtaSeconds)}',
+                            style: TextStyle(color: Colors.grey.shade500, fontSize: 13),
                           ),
                         ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-
-              // Waveform section - dominant space
-              Expanded(
-                flex: 6,
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 24),
-                  child: WaveformSection(
-                    seconds: widget.wal.seconds,
-                    waveformData: _waveformData,
-                    isProcessingWaveform: _isProcessingWaveform,
-                    playbackState: playbackState,
-                    isPlaying: isPlaying,
+                      ],
+                    ],
                   ),
                 ),
               ),
+            ),
 
-              // Timer display
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 24),
-                child: Consumer<SyncProvider>(
-                  builder: (context, syncProvider, child) {
-                    final currentPos = isPlaying ? playbackState.currentPosition : Duration.zero;
-                    return Text(
-                      _formatDuration(currentPos),
-                      style: Theme.of(context).textTheme.titleLarge!.copyWith(
-                            fontSize: 48,
-                            fontWeight: FontWeight.w300,
-                            letterSpacing: 2,
-                          ),
-                    );
-                  },
+            // Transfer button
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 42),
+              child: SizedBox(
+                width: double.infinity,
+                height: 56,
+                child: ElevatedButton(
+                  onPressed: isTransferring ? _handleCancelTransfer : _handleTransferToPhone,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: isTransferring ? Colors.orange : Colors.deepPurpleAccent,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                  ),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(isTransferring ? Icons.close : Icons.download, color: Colors.white, size: 22),
+                      const SizedBox(width: 12),
+                      Text(
+                        isTransferring ? context.l10n.cancelTransfer : context.l10n.transferToPhone,
+                        style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w600),
+                      ),
+                    ],
+                  ),
                 ),
               ),
+            ),
+          ],
+        );
+      },
+    );
+  }
 
-              // Controls section
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 16),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                  children: [
-                    _buildControlButton(
-                      icon: Icons.replay_10,
-                      onPressed: playbackState.canPlayOrShare && isPlaying
-                          ? () => _handleSkipBackward(context.read<SyncProvider>())
-                          : null,
-                      size: 60,
+  Widget _buildPlaybackUI() {
+    return Consumer<SyncProvider>(
+      builder: (context, syncProvider, child) {
+        final playbackState = _getPlaybackState(syncProvider);
+        final isPlaying = syncProvider.isWalPlaying(widget.wal.id);
+
+        return Column(
+          children: [
+            // Title section
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+              child: Column(
+                children: [
+                  Text(
+                    dateTimeFormat('dd MMM yyyy', DateTime.fromMillisecondsSinceEpoch(widget.wal.timerStart * 1000)),
+                    style: Theme.of(context).textTheme.titleLarge!.copyWith(fontSize: 28, fontWeight: FontWeight.w600),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    dateTimeFormat('H:mm', DateTime.fromMillisecondsSinceEpoch(widget.wal.timerStart * 1000)),
+                    style: Theme.of(context).textTheme.bodyMedium!.copyWith(
+                          color: Colors.grey.shade400,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w400,
+                        ),
+                  ),
+                  const SizedBox(height: 8),
+                  // Privacy notice
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: Colors.grey.withValues(alpha: 0.15),
+                      borderRadius: BorderRadius.circular(12),
                     ),
-                    _buildControlButton(
-                      icon: playbackState.isProcessing
-                          ? Icons.hourglass_empty
-                          : (isPlaying ? Icons.pause : Icons.play_arrow),
-                      size: 80,
-                      backgroundColor: Theme.of(context).colorScheme.secondary,
-                      iconColor: Colors.white,
-                      onPressed: playbackState.canPlayOrShare && !playbackState.isProcessing
-                          ? () => _handlePlayPause(context.read<SyncProvider>())
-                          : null,
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.security, color: Colors.grey.shade400, size: 14),
+                        const SizedBox(width: 6),
+                        Text(
+                          context.l10n.privateAndSecureOnDevice,
+                          style: TextStyle(color: Colors.grey.shade400, fontSize: 12, fontWeight: FontWeight.w500),
+                        ),
+                      ],
                     ),
-                    _buildControlButton(
-                      icon: Icons.forward_10,
-                      onPressed: playbackState.canPlayOrShare && isPlaying
-                          ? () => _handleSkipForward(context.read<SyncProvider>())
-                          : null,
-                      size: 60,
-                    ),
-                  ],
+                  ),
+                ],
+              ),
+            ),
+
+            // Waveform section - dominant space
+            Expanded(
+              flex: 6,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 24),
+                child: WaveformSection(
+                  seconds: widget.wal.seconds,
+                  waveformData: _waveformData,
+                  isProcessingWaveform: _isProcessingWaveform,
+                  playbackState: playbackState,
+                  isPlaying: isPlaying,
                 ),
               ),
+            ),
 
-              const SizedBox(height: 32),
-            ],
-          );
-        },
-      ),
+            // Timer display
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 24),
+              child: Consumer<SyncProvider>(
+                builder: (context, syncProvider, child) {
+                  final currentPos = isPlaying ? playbackState.currentPosition : Duration.zero;
+                  return Text(
+                    _formatDuration(currentPos),
+                    style: Theme.of(
+                      context,
+                    ).textTheme.titleLarge!.copyWith(fontSize: 48, fontWeight: FontWeight.w300, letterSpacing: 2),
+                  );
+                },
+              ),
+            ),
+
+            // Controls section
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 16),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [
+                  _buildControlButton(
+                    icon: FontAwesomeIcons.backward,
+                    onPressed: playbackState.canPlayOrShare && isPlaying
+                        ? () => _handleSkipBackward(context.read<SyncProvider>())
+                        : null,
+                    size: 60,
+                  ),
+                  _buildControlButton(
+                    icon: playbackState.isProcessing
+                        ? FontAwesomeIcons.hourglass
+                        : (isPlaying ? FontAwesomeIcons.pause : FontAwesomeIcons.play),
+                    size: 80,
+                    backgroundColor: Theme.of(context).colorScheme.secondary,
+                    iconColor: Colors.white,
+                    onPressed: playbackState.canPlayOrShare && !playbackState.isProcessing
+                        ? () => _handlePlayPause(context.read<SyncProvider>())
+                        : null,
+                  ),
+                  _buildControlButton(
+                    icon: FontAwesomeIcons.forward,
+                    onPressed: playbackState.canPlayOrShare && isPlaying
+                        ? () => _handleSkipForward(context.read<SyncProvider>())
+                        : null,
+                    size: 60,
+                  ),
+                ],
+              ),
+            ),
+
+            const SizedBox(height: 32),
+          ],
+        );
+      },
     );
   }
 
@@ -247,7 +460,7 @@ class _WalItemDetailPageState extends State<WalItemDetailPage> {
   }
 
   Widget _buildControlButton({
-    required IconData icon,
+    required FaIconData icon,
     VoidCallback? onPressed,
     double size = 48,
     Color? backgroundColor,
@@ -262,21 +475,38 @@ class _WalItemDetailPageState extends State<WalItemDetailPage> {
       ),
       child: IconButton(
         onPressed: onPressed,
-        icon: Icon(
-          icon,
-          color: iconColor ?? Colors.white,
-          size: size * 0.4,
-        ),
+        icon: FaIcon(icon, color: iconColor ?? Colors.white, size: size * 0.4),
       ),
     );
   }
 
-  Future<void> _handlePlayPause(SyncProvider syncProvider) async {
-    if (widget.wal.storage == WalStorage.sdcard) {
-      _showSnackBar('Playback for SD card audio is not yet available.', Colors.orange);
-      return;
-    }
+  Future<void> _handleTransferToPhone() async {
+    if (!mounted) return;
 
+    try {
+      final syncProvider = context.read<SyncProvider>();
+      await syncProvider.transferWalToPhone(widget.wal);
+
+      if (mounted) {
+        _showSnackBar(context.l10n.transferCompleteMessage, Colors.green);
+        Navigator.of(context).pop();
+      }
+    } catch (e) {
+      if (mounted) {
+        _showSnackBar(context.l10n.transferFailedMessage(e.toString()), Colors.red);
+      }
+    }
+  }
+
+  void _handleCancelTransfer() {
+    final syncProvider = context.read<SyncProvider>();
+    syncProvider.cancelSync();
+    _showSnackBar(context.l10n.transferCancelled, Colors.orange);
+    // Pop back since the WAL state will change
+    Navigator.of(context).pop();
+  }
+
+  Future<void> _handlePlayPause(SyncProvider syncProvider) async {
     await syncProvider.toggleWalPlayback(widget.wal);
   }
 
@@ -289,38 +519,66 @@ class _WalItemDetailPageState extends State<WalItemDetailPage> {
   }
 
   void _showOptionsMenu(BuildContext context) {
+    final syncProvider = context.read<SyncProvider>();
+    final currentWal = syncProvider.getWalById(widget.wal.id) ?? widget.wal;
+    final isTransferring = currentWal.isSyncing;
+
     showModalBottomSheet(
       context: context,
       backgroundColor: const Color(0xFF1F1F25),
-      builder: (context) => Container(
+      builder: (sheetContext) => Container(
         padding: const EdgeInsets.all(24),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             ListTile(
               leading: const Icon(Icons.info_outline, color: Colors.white),
-              title: Text('Recording Info', style: Theme.of(context).textTheme.bodyMedium),
+              title: Text(context.l10n.recordingInfo, style: Theme.of(sheetContext).textTheme.bodyMedium),
               onTap: () {
-                Navigator.pop(context);
+                Navigator.pop(sheetContext);
                 _showFileDetailsDialog(context);
               },
             ),
+            if (_needsTransfer) ...[
+              ListTile(
+                leading: Icon(Icons.download, color: isTransferring ? Colors.grey : Colors.white),
+                title: Text(
+                  isTransferring ? context.l10n.transferInProgress : context.l10n.transferToPhone,
+                  style: Theme.of(
+                    sheetContext,
+                  ).textTheme.bodyMedium!.copyWith(color: isTransferring ? Colors.grey : Colors.white),
+                ),
+                onTap: isTransferring
+                    ? null
+                    : () {
+                        Navigator.pop(sheetContext);
+                        _handleTransferToPhone();
+                      },
+              ),
+            ] else ...[
+              ListTile(
+                leading: FaIcon(FontAwesomeIcons.share, color: Colors.white, size: 18),
+                title: Text(context.l10n.shareRecording, style: Theme.of(sheetContext).textTheme.bodyMedium),
+                onTap: () {
+                  Navigator.pop(sheetContext);
+                  _handleShare(context.read<SyncProvider>());
+                },
+              ),
+            ],
             ListTile(
-              leading: const Icon(Icons.share, color: Colors.white),
-              title: Text('Share Recording', style: Theme.of(context).textTheme.bodyMedium),
-              onTap: () {
-                Navigator.pop(context);
-                _handleShare(context.read<SyncProvider>());
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.delete, color: Colors.red),
-              title:
-                  Text('Delete Recording', style: Theme.of(context).textTheme.bodyMedium!.copyWith(color: Colors.red)),
-              onTap: () {
-                Navigator.pop(context); // Close options menu
-                _showDeleteDialog(context);
-              },
+              leading: Icon(Icons.delete, color: isTransferring ? Colors.grey : Colors.red),
+              title: Text(
+                context.l10n.deleteRecording,
+                style: Theme.of(
+                  sheetContext,
+                ).textTheme.bodyMedium!.copyWith(color: isTransferring ? Colors.grey : Colors.red),
+              ),
+              onTap: isTransferring
+                  ? null
+                  : () {
+                      Navigator.pop(sheetContext);
+                      _showDeleteDialog(context);
+                    },
             ),
           ],
         ),
@@ -329,32 +587,28 @@ class _WalItemDetailPageState extends State<WalItemDetailPage> {
   }
 
   void _showDeleteDialog(BuildContext context) async {
+    final uploading = widget.wal.syncDisplayState == WalSyncDisplayState.uploaded;
     final confirmed = await OmiConfirmDialog.show(
       context,
-      title: 'Delete Recording',
-      message: 'Are you sure you want to permanently delete this recording? This can\'t be undone.',
-      confirmLabel: 'Delete',
+      title: uploading ? context.l10n.deleteWhileProcessingTitle : context.l10n.deleteRecording,
+      message: uploading ? context.l10n.deleteWhileProcessingMessage : context.l10n.deleteRecordingConfirmation,
+      confirmLabel: context.l10n.delete,
       confirmColor: Colors.red,
     );
 
-    if (confirmed == true && mounted) {
+    if (confirmed == true && context.mounted) {
       Navigator.of(context).pop(); // Go back to previous screen
       context.read<SyncProvider>().deleteWal(widget.wal);
     }
   }
 
   Future<void> _handleShare(SyncProvider syncProvider) async {
-    if (widget.wal.storage == WalStorage.sdcard) {
-      _showSnackBar('Sharing for SD card audio is not yet available.', Colors.orange);
-      return;
-    }
-
-    setState(() => _isSharing = true);
     try {
       await syncProvider.shareWalAsWav(widget.wal);
-    } finally {
+    } catch (e) {
+      Logger.error('AudioPlayerUtils: Failed to share WAL audio: $e');
       if (mounted) {
-        setState(() => _isSharing = false);
+        AppSnackbar.showSnackbarError(context.l10n.audioPlaybackFailed);
       }
     }
   }
@@ -377,29 +631,32 @@ class _WalItemDetailPageState extends State<WalItemDetailPage> {
               Center(
                 child: Padding(
                   padding: const EdgeInsets.only(bottom: 16.0),
-                  child: Image.asset(
-                    DeviceUtils.getDeviceImagePathByModel(widget.wal.deviceModel),
-                    height: 60,
-                  ),
+                  child: Image.asset(DeviceUtils.getDeviceImagePathByModel(widget.wal.deviceModel), height: 60),
                 ),
               ),
-              _buildDetailRow('Recording ID', widget.wal.id),
-              _buildDetailRow('Date & Time', dateTimeFormat('MMM dd, yyyy h:mm:ss a', recordingDate)),
-              _buildDetailRow('Duration', secondsToHumanReadable(widget.wal.seconds)),
-              _buildDetailRow('Audio Format', widget.wal.codec.toFormattedString()),
-              _buildDetailRow('Storage Location', widget.wal.storage == WalStorage.sdcard ? 'SD Card' : 'Phone'),
-              _buildDetailRow('Estimated Size', estimatedSize),
-              _buildDetailRow('Device Model', widget.wal.deviceModel ?? 'Unknown'),
+              _buildDetailRow(context.l10n.recordingIdLabel, widget.wal.id),
+              _buildDetailRow(context.l10n.dateTimeLabel, dateTimeFormat('MMM dd, yyyy h:mm:ss a', recordingDate)),
+              _buildDetailRow(context.l10n.durationLabel, secondsToHumanReadable(widget.wal.seconds, context)),
+              _buildDetailRow(context.l10n.audioFormatLabel, widget.wal.codec.toFormattedString()),
+              _buildDetailRow(context.l10n.storageLocationLabel, _getStorageLocationLabel(widget.wal.storage, context)),
+              _buildDetailRow(context.l10n.estimatedSizeLabel, estimatedSize),
+              _buildDetailRow(context.l10n.deviceModelLabel, widget.wal.deviceModel ?? context.l10n.unknownDevice),
               if (widget.wal.device.isNotEmpty && widget.wal.device != "phone")
-                _buildDetailRow('Device ID', widget.wal.device),
-              _buildDetailRow('Status', widget.wal.status == WalStatus.synced ? 'Processed' : 'Unprocessed'),
+                _buildDetailRow(context.l10n.deviceIdLabel, widget.wal.device),
+              _buildDetailRow(
+                context.l10n.statusLabel,
+                widget.wal.status == WalStatus.synced ? context.l10n.statusProcessed : context.l10n.statusUnprocessed,
+              ),
             ],
           ),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(context).pop(),
-            child: Text('Close', style: theme.textTheme.labelMedium?.copyWith(color: theme.colorScheme.secondary)),
+            child: Text(
+              context.l10n.close,
+              style: theme.textTheme.labelMedium?.copyWith(color: theme.colorScheme.secondary),
+            ),
           ),
         ],
       ),
@@ -412,15 +669,9 @@ class _WalItemDetailPageState extends State<WalItemDetailPage> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            label,
-            style: Theme.of(context).textTheme.labelMedium!.copyWith(color: Colors.grey.shade400),
-          ),
+          Text(label, style: Theme.of(context).textTheme.labelMedium!.copyWith(color: Colors.grey.shade400)),
           const SizedBox(height: 2),
-          Text(
-            value,
-            style: Theme.of(context).textTheme.bodyMedium,
-          ),
+          Text(value, style: Theme.of(context).textTheme.bodyMedium),
         ],
       ),
     );

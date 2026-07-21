@@ -1,3 +1,4 @@
+import 'package:omi/backend/schema/gen/apps_wire.g.dart' as wire;
 import 'package:omi/utils/other/string_utils.dart';
 import 'package:omi/widgets/extensions/string.dart';
 
@@ -23,19 +24,25 @@ class AppReview {
   });
 
   factory AppReview.fromJson(Map<String, dynamic> json) {
-    return AppReview(
-      uid: json['uid'],
-      ratedAt: DateTime.parse(json['rated_at']).toLocal(),
-      score: json['score'],
-      review: json['review'],
-      username: json['user_name'] ?? '',
-      response: json['response'] ?? '',
+    if (json['responded_at'] == '') json['responded_at'] = null;
+    return AppReview.fromGenerated(
+      wire.GeneratedAppReview.fromJson(json),
       updatedAt: (json['updated_at'] == "" || json['updated_at'] == null)
           ? null
           : DateTime.parse(json['updated_at']).toLocal(),
-      respondedAt: (json['responded_at'] == "" || json['responded_at'] == null)
-          ? null
-          : DateTime.parse(json['responded_at']).toLocal(),
+    );
+  }
+
+  factory AppReview.fromGenerated(wire.GeneratedAppReview generated, {DateTime? updatedAt}) {
+    return AppReview(
+      uid: generated.uid,
+      ratedAt: generated.ratedAt.toLocal(),
+      score: generated.score,
+      review: generated.review,
+      username: generated.username ?? '',
+      response: generated.response ?? '',
+      updatedAt: updatedAt,
+      respondedAt: generated.respondedAt?.toLocal(),
     );
   }
 
@@ -47,8 +54,8 @@ class AppReview {
       'review': review,
       'username': username,
       'response': response,
-      'updated_at': updatedAt?.toUtc().toIso8601String() ?? '',
-      'responded_at': respondedAt?.toUtc().toIso8601String() ?? '',
+      'updated_at': updatedAt?.toUtc().toIso8601String(),
+      'responded_at': respondedAt?.toUtc().toIso8601String(),
     };
   }
 
@@ -61,16 +68,14 @@ class AuthStep {
   String name;
   String url;
 
-  AuthStep({
-    required this.name,
-    required this.url,
-  });
+  AuthStep({required this.name, required this.url});
 
   factory AuthStep.fromJson(Map<String, dynamic> json) {
-    return AuthStep(
-      name: json['name'],
-      url: json['url'],
-    );
+    return AuthStep.fromGenerated(wire.GeneratedAuthStep.fromJson(json));
+  }
+
+  factory AuthStep.fromGenerated(wire.GeneratedAuthStep generated) {
+    return AuthStep(name: generated.name, url: generated.url);
   }
 
   toJson() {
@@ -81,19 +86,65 @@ class AuthStep {
 class Action {
   String action;
 
-  Action({
-    required this.action,
-  });
+  Action({required this.action});
 
   factory Action.fromJson(Map<String, dynamic> json) {
-    return Action(
-      action: json['action'],
+    return Action.fromGenerated(wire.GeneratedAction.fromJson(json));
+  }
+
+  factory Action.fromGenerated(wire.GeneratedAction generated) {
+    return Action(action: generated.action);
+  }
+
+  toJson() {
+    return {'action': action};
+  }
+}
+
+class ChatTool {
+  String name;
+  String description;
+  String endpoint;
+  String method;
+  bool authRequired;
+  String? statusMessage;
+  bool isMcp;
+
+  ChatTool({
+    required this.name,
+    required this.description,
+    required this.endpoint,
+    this.method = 'POST',
+    this.authRequired = true,
+    this.statusMessage,
+    this.isMcp = false,
+  });
+
+  factory ChatTool.fromJson(Map<String, dynamic> json) {
+    return ChatTool.fromGenerated(wire.GeneratedChatTool.fromJson(json));
+  }
+
+  factory ChatTool.fromGenerated(wire.GeneratedChatTool generated) {
+    return ChatTool(
+      name: generated.name,
+      description: generated.description,
+      endpoint: generated.endpoint,
+      method: generated.method,
+      authRequired: generated.authRequired,
+      statusMessage: generated.statusMessage,
+      isMcp: generated.isMcp,
     );
   }
 
   toJson() {
     return {
-      'action': action,
+      'name': name,
+      'description': description,
+      'endpoint': endpoint,
+      'method': method,
+      'auth_required': authRequired,
+      if (statusMessage != null) 'status_message': statusMessage,
+      'is_mcp': isMcp,
     };
   }
 }
@@ -107,6 +158,8 @@ class ExternalIntegration {
   List<AuthStep> authSteps = [];
   String? appHomeUrl;
   List<Action>? actions;
+  String? chatToolsManifestUrl;
+  String? mcpServerUrl;
 
   ExternalIntegration({
     this.triggersOn,
@@ -117,20 +170,32 @@ class ExternalIntegration {
     this.authSteps = const [],
     this.appHomeUrl,
     this.actions,
+    this.chatToolsManifestUrl,
+    this.mcpServerUrl,
   });
 
   factory ExternalIntegration.fromJson(Map<String, dynamic> json) {
+    return ExternalIntegration.fromGenerated(
+      wire.GeneratedExternalIntegration.fromJson(json),
+      legacyIsInstructionsUrl: json.containsKey('is_instructions_url') ? null : false,
+    );
+  }
+
+  factory ExternalIntegration.fromGenerated(
+    wire.GeneratedExternalIntegration generated, {
+    bool? legacyIsInstructionsUrl,
+  }) {
     return ExternalIntegration(
-      triggersOn: json['triggers_on'],
-      webhookUrl: json['webhook_url'],
-      setupCompletedUrl: json['setup_completed_url'],
-      appHomeUrl: json['app_home_url'],
-      isInstructionsUrl: json['is_instructions_url'] ?? false,
-      setupInstructionsFilePath: json['setup_instructions_file_path'],
-      authSteps: json['auth_steps'] == null
-          ? []
-          : (json['auth_steps'] ?? []).map<AuthStep>((e) => AuthStep.fromJson(e)).toList(),
-      actions: json['actions'] == null ? null : (json['actions'] ?? []).map<Action>((e) => Action.fromJson(e)).toList(),
+      triggersOn: generated.triggersOn,
+      webhookUrl: generated.webhookUrl,
+      setupCompletedUrl: generated.setupCompletedUrl,
+      appHomeUrl: generated.appHomeUrl,
+      isInstructionsUrl: legacyIsInstructionsUrl ?? generated.isInstructionsUrl,
+      setupInstructionsFilePath: generated.setupInstructionsFilePath,
+      authSteps: (generated.authSteps ?? const []).map(AuthStep.fromGenerated).toList(),
+      actions: generated.actions?.map(Action.fromGenerated).toList(),
+      chatToolsManifestUrl: generated.chatToolsManifestUrl,
+      mcpServerUrl: generated.mcpServerUrl,
     );
   }
 
@@ -157,6 +222,8 @@ class ExternalIntegration {
       'setup_instructions_file_path': setupInstructionsFilePath,
       'auth_steps': authSteps.map((e) => e.toJson()).toList(),
       'actions': actions?.map((e) => e.toJson()).toList(),
+      'chat_tools_manifest_url': chatToolsManifestUrl,
+      if (mcpServerUrl != null) 'mcp_server_url': mcpServerUrl,
     };
   }
 }
@@ -165,27 +232,14 @@ class AppUsageHistory {
   DateTime date;
   int count;
 
-  AppUsageHistory({
-    required this.date,
-    required this.count,
-  });
+  AppUsageHistory({required this.date, required this.count});
 
   factory AppUsageHistory.fromJson(Map<String, dynamic> json) {
-    return AppUsageHistory(
-      date: DateTime.parse(json['date']).toLocal(),
-      count: json['count'],
-    );
-  }
-
-  static List<AppUsageHistory> fromJsonList(List<dynamic> jsonList) {
-    return jsonList.map((e) => AppUsageHistory.fromJson(e)).toList();
+    return AppUsageHistory(date: DateTime.parse(json['date']).toLocal(), count: json['count']);
   }
 
   toJson() {
-    return {
-      'date': date.toUtc().toIso8601String(),
-      'count': count,
-    };
+    return {'date': date.toUtc().toIso8601String(), 'count': count};
   }
 }
 
@@ -200,8 +254,6 @@ class App {
   String description;
   String image;
   Set<String> capabilities;
-  List<String> connectedAccounts = [];
-  Map? twitter;
   bool private;
   bool approved;
   String? conversationPrompt;
@@ -226,6 +278,12 @@ class App {
   List<String> thumbnailUrls;
   String? username;
   bool? isPopular;
+  List<ChatTool>? chatTools;
+  DateTime? createdAt;
+  DateTime? updatedAt;
+  double? score; // Computed ranking score for sorting (temporary debug field)
+  bool official;
+  String? sourceCodeUrl;
 
   App({
     required this.id,
@@ -261,9 +319,13 @@ class App {
     this.thumbnailIds = const [],
     this.thumbnailUrls = const [],
     this.username,
-    this.connectedAccounts = const [],
-    this.twitter,
     this.isPopular = false,
+    this.chatTools,
+    this.createdAt,
+    this.updatedAt,
+    this.score,
+    this.official = false,
+    this.sourceCodeUrl,
   });
 
   String getName() {
@@ -276,9 +338,7 @@ class App {
 
   bool worksWithMemories() => hasCapability('memories');
 
-  bool worksWithChat() => hasCapability('chat') || hasCapability('persona');
-
-  bool isNotPersona() => !hasCapability('persona');
+  bool worksWithChat() => hasCapability('chat');
 
   bool worksExternally() => hasCapability('external_integration');
 
@@ -302,47 +362,183 @@ class App {
     return false;
   }
 
+  bool hasTasksAccess() {
+    if (worksExternally()) {
+      final actions = externalIntegration?.actions;
+      if (actions != null) {
+        return actions.any((a) => a.action == 'read_tasks');
+      }
+    }
+    return false;
+  }
+
+  /// Legacy cached JSON (AppReview.toJson before the null-date fix) wrote null
+  /// review dates as '', which the strict generated parser rejects. Convert
+  /// them back to null so cached apps lists keep parsing.
+  static void _sanitizeLegacyReviewDates(Map<String, dynamic> json) {
+    void fixReview(dynamic review) {
+      if (review is Map) {
+        for (final key in const ['responded_at', 'updated_at']) {
+          if (review[key] == '') review[key] = null;
+        }
+      }
+    }
+
+    final reviews = json['reviews'];
+    if (reviews is List) reviews.forEach(fixReview);
+    fixReview(json['user_review']);
+  }
+
   factory App.fromJson(Map<String, dynamic> json) {
+    _sanitizeLegacyReviewDates(json);
+    return App.fromGeneratedDetail(
+      wire.GeneratedApp.fromJson(json),
+      approvedFallback: json.containsKey('approved') ? null : true,
+      privateFallback: json['private'] as bool? ?? json['id'].toString().contains('private'),
+    );
+  }
+
+  factory App.fromGeneratedDetail(wire.GeneratedApp generated, {bool? approvedFallback, bool? privateFallback}) {
     return App(
-      category: json['category'] ?? 'other',
-      approved: json['approved'] ?? true,
-      status: json['status'] ?? 'approved',
-      id: json['id'],
-      email: json['email'] ?? '',
-      uid: json['uid'] ?? '',
-      name: json['name'],
-      author: json['author'],
-      description: json['description'],
-      image: json['image'],
-      chatPrompt: json['chat_prompt'],
-      conversationPrompt: json['memory_prompt'],
-      externalIntegration:
-          json['external_integration'] != null ? ExternalIntegration.fromJson(json['external_integration']) : null,
-      reviews: AppReview.fromJsonList(json['reviews'] ?? []),
-      userReview: json['user_review'] != null ? AppReview.fromJson(json['user_review']) : null,
-      ratingAvg: json['rating_avg'],
-      ratingCount: json['rating_count'] ?? 0,
-      capabilities: ((json['capabilities'] ?? []) as List).cast<String>().toSet(),
-      deleted: json['deleted'] ?? false,
-      enabled: json['enabled'] ?? false,
-      installs: json['installs'] ?? 0,
-      private: json['private'] ?? json['id'].toString().contains('private'),
-      proactiveNotification: json['proactive_notification'] != null
-          ? ProactiveNotification.fromJson(json['proactive_notification'])
-          : null,
-      usageCount: json['usage_count'] ?? 0,
-      moneyMade: json['money_made'] ?? 0.0,
-      isPaid: json['is_paid'] ?? false,
-      paymentPlan: json['payment_plan'],
-      price: json['price'] ?? 0.0,
-      isUserPaid: json['is_user_paid'] ?? false,
-      paymentLink: json['payment_link'],
-      thumbnailIds: (json['thumbnails'] as List<dynamic>?)?.cast<String>() ?? [],
-      thumbnailUrls: (json['thumbnail_urls'] as List<dynamic>?)?.cast<String>() ?? [],
-      username: json['username'],
-      connectedAccounts: (json['connected_accounts'] as List<dynamic>?)?.cast<String>() ?? [],
-      twitter: json['twitter'],
-      isPopular: json['is_popular'] ?? false,
+      category: generated.category,
+      approved: approvedFallback ?? generated.approved,
+      status: generated.status,
+      id: generated.id,
+      email: generated.email ?? '',
+      uid: generated.uid ?? '',
+      name: generated.name,
+      author: generated.author,
+      description: generated.description,
+      image: generated.image,
+      externalIntegration: generated.externalIntegration == null
+          ? null
+          : ExternalIntegration.fromGenerated(generated.externalIntegration!),
+      ratingAvg: generated.ratingAvg,
+      ratingCount: generated.ratingCount,
+      capabilities: generated.capabilities.toSet(),
+      chatPrompt: generated.chatPrompt,
+      conversationPrompt: generated.memoryPrompt,
+      reviews: generated.reviews?.map(AppReview.fromGenerated).toList() ?? [],
+      userReview: generated.userReview == null ? null : AppReview.fromGenerated(generated.userReview!),
+      deleted: false,
+      enabled: generated.enabled,
+      installs: generated.installs,
+      private: privateFallback ?? generated.private,
+      proactiveNotification: generated.proactiveNotification == null
+          ? null
+          : ProactiveNotification.fromGenerated(generated.proactiveNotification!),
+      usageCount: generated.usageCount ?? 0,
+      moneyMade: generated.moneyMade ?? 0.0,
+      isPaid: generated.isPaid ?? false,
+      paymentPlan: generated.paymentPlan,
+      price: generated.price ?? 0.0,
+      isUserPaid: generated.isUserPaid ?? false,
+      paymentLink: generated.paymentLink,
+      thumbnailIds: generated.thumbnails ?? [],
+      thumbnailUrls: generated.thumbnailUrls ?? [],
+      username: generated.username,
+      isPopular: generated.isPopular ?? false,
+      chatTools: (generated.chatTools ?? const []).map(ChatTool.fromGenerated).toList(),
+      createdAt: generated.createdAt,
+      updatedAt: null,
+      score: generated.score,
+      official: generated.official ?? false,
+      sourceCodeUrl: generated.sourceCodeUrl,
+    );
+  }
+
+  factory App.fromGenerated(wire.GeneratedAppBaseModel generated, {bool? approvedFallback, bool? privateFallback}) {
+    return App(
+      category: generated.category,
+      approved: approvedFallback ?? generated.approved,
+      status: generated.status,
+      id: generated.id,
+      email: '',
+      uid: generated.uid ?? '',
+      name: generated.name,
+      author: generated.author,
+      description: generated.description,
+      image: generated.image,
+      externalIntegration: generated.externalIntegration == null
+          ? null
+          : ExternalIntegration.fromGenerated(generated.externalIntegration!),
+      ratingAvg: generated.ratingAvg,
+      ratingCount: generated.ratingCount,
+      capabilities: generated.capabilities.toSet(),
+      chatPrompt: null,
+      conversationPrompt: null,
+      reviews: [],
+      userReview: null,
+      deleted: false,
+      enabled: generated.enabled,
+      installs: generated.installs,
+      private: privateFallback ?? generated.private,
+      proactiveNotification: generated.proactiveNotification == null
+          ? null
+          : ProactiveNotification.fromGenerated(generated.proactiveNotification!),
+      usageCount: 0,
+      moneyMade: 0.0,
+      isPaid: generated.isPaid ?? false,
+      paymentPlan: generated.paymentPlan,
+      price: generated.price ?? 0.0,
+      isUserPaid: generated.isUserPaid ?? false,
+      paymentLink: generated.paymentLink,
+      thumbnailIds: generated.thumbnails ?? [],
+      thumbnailUrls: generated.thumbnailUrls ?? [],
+      username: generated.username,
+      isPopular: generated.isPopular ?? false,
+      chatTools: (generated.chatTools ?? const []).map(ChatTool.fromGenerated).toList(),
+      createdAt: generated.createdAt,
+      updatedAt: null,
+      score: generated.score,
+      official: generated.official ?? false,
+      sourceCodeUrl: generated.sourceCodeUrl,
+    );
+  }
+
+  factory App.fromGeneratedCatalogItem(wire.GeneratedAppCatalogItem generated) {
+    return App(
+      category: generated.category,
+      approved: generated.approved,
+      status: generated.status,
+      id: generated.id,
+      email: '',
+      uid: '',
+      name: generated.name,
+      author: generated.author,
+      description: generated.description,
+      image: generated.image,
+      externalIntegration: generated.externalIntegration == null
+          ? null
+          : ExternalIntegration.fromGenerated(generated.externalIntegration!),
+      ratingAvg: generated.ratingAvg,
+      ratingCount: generated.ratingCount,
+      capabilities: (generated.capabilities ?? const <String>[]).toSet(),
+      chatPrompt: null,
+      conversationPrompt: null,
+      reviews: [],
+      userReview: null,
+      deleted: false,
+      enabled: generated.enabled,
+      installs: generated.installs,
+      private: generated.private,
+      usageCount: 0,
+      moneyMade: 0.0,
+      isPaid: generated.isPaid ?? false,
+      paymentPlan: null,
+      price: generated.price ?? 0.0,
+      isUserPaid: false,
+      paymentLink: null,
+      thumbnailIds: [],
+      thumbnailUrls: [],
+      username: null,
+      isPopular: false,
+      chatTools: [],
+      createdAt: null,
+      updatedAt: null,
+      score: null,
+      official: false,
+      sourceCodeUrl: null,
     );
   }
 
@@ -389,12 +585,13 @@ class App {
     return category.decodeString.split('-').map((e) => e.capitalize()).join(' ');
   }
 
-  List<AppCapability> getCapabilitiesFromIds(List<AppCapability> allCapabilities) {
-    return allCapabilities.where((e) => capabilities.contains(e.id)).toList();
+  /// Returns the most recent date (updated_at preferred, falls back to created_at)
+  DateTime? getLastUpdatedDate() {
+    return updatedAt ?? createdAt;
   }
 
-  List<String> getConnectedAccountNames() {
-    return connectedAccounts.map((e) => e.capitalize()).toList();
+  List<AppCapability> getCapabilitiesFromIds(List<AppCapability> allCapabilities) {
+    return allCapabilities.where((e) => capabilities.contains(e.id)).toList();
   }
 
   Map<String, dynamic> toJson() {
@@ -429,6 +626,8 @@ class App {
       'price': price,
       'is_user_paid': isUserPaid,
       'payment_link': paymentLink,
+      'official': official,
+      'source_code_url': sourceCodeUrl,
     };
   }
 
@@ -445,27 +644,18 @@ class App {
 class Category {
   String title;
   String id;
-  Category({
-    required this.title,
-    required this.id,
-  });
+  Category({required this.title, required this.id});
 
   factory Category.fromJson(Map<String, dynamic> json) {
-    return Category(
-      title: json['title'],
-      id: json['id'],
-    );
+    return Category.fromGenerated(wire.GeneratedAppSelectOption.fromJson(json));
+  }
+
+  factory Category.fromGenerated(wire.GeneratedAppSelectOption generated) {
+    return Category(title: generated.title, id: generated.id);
   }
 
   toJson() {
-    return {
-      'title': title,
-      'id': id,
-    };
-  }
-
-  static List<Category> fromJsonList(List<dynamic> jsonList) {
-    return jsonList.map((e) => Category.fromJson(e)).toList();
+    return {'title': title, 'id': id};
   }
 }
 
@@ -485,12 +675,16 @@ class AppCapability {
   });
 
   factory AppCapability.fromJson(Map<String, dynamic> json) {
+    return AppCapability.fromGenerated(wire.GeneratedAppCapabilityResponse.fromJson(json));
+  }
+
+  factory AppCapability.fromGenerated(wire.GeneratedAppCapabilityResponse generated) {
     return AppCapability(
-      title: json['title'],
-      id: json['id'],
-      triggerEvents: TriggerEvent.fromJsonList(json['triggers'] ?? []),
-      notificationScopes: NotificationScope.fromJsonList(json['scopes'] ?? []),
-      actions: CapacityAction.fromJsonList(json['actions'] ?? []),
+      title: generated.title,
+      id: generated.id,
+      triggerEvents: (generated.triggers ?? const []).map(TriggerEvent.fromGenerated).toList(),
+      notificationScopes: (generated.scopes ?? const []).map(NotificationScope.fromGenerated).toList(),
+      actions: (generated.actions ?? const []).map(CapacityAction.fromGenerated).toList(),
     );
   }
 
@@ -504,10 +698,6 @@ class AppCapability {
     };
   }
 
-  static List<AppCapability> fromJsonList(List<dynamic> jsonList) {
-    return jsonList.map((e) => AppCapability.fromJson(e)).toList();
-  }
-
   bool hasTriggers() => triggerEvents.isNotEmpty;
   bool hasScopes() => notificationScopes.isNotEmpty;
   bool hasActions() => actions.isNotEmpty;
@@ -519,107 +709,77 @@ class CapacityAction {
   String? docUrl;
   String? description;
 
-  CapacityAction({
-    required this.title,
-    required this.id,
-    this.docUrl,
-    this.description,
-  });
+  CapacityAction({required this.title, required this.id, this.docUrl, this.description});
 
   factory CapacityAction.fromJson(Map<String, dynamic> json) {
+    return CapacityAction.fromGenerated(wire.GeneratedAppCapabilityAction.fromJson(json));
+  }
+
+  factory CapacityAction.fromGenerated(wire.GeneratedAppCapabilityAction generated) {
     return CapacityAction(
-      title: json['title'],
-      id: json['id'],
-      docUrl: json['doc_url'],
-      description: json['description'],
+      title: generated.title,
+      id: generated.id,
+      docUrl: generated.docUrl,
+      description: generated.description,
     );
   }
 
   toJson() {
-    return {
-      'title': title,
-      'id': id,
-      'doc_url': docUrl,
-      'description': description,
-    };
-  }
-
-  static List<CapacityAction> fromJsonList(List<dynamic> jsonList) {
-    return jsonList.map((e) => CapacityAction.fromJson(e)).toList();
+    return {'title': title, 'id': id, 'doc_url': docUrl, 'description': description};
   }
 }
 
 class TriggerEvent {
   String title;
   String id;
-  TriggerEvent({
-    required this.title,
-    required this.id,
-  });
+  TriggerEvent({required this.title, required this.id});
 
   factory TriggerEvent.fromJson(Map<String, dynamic> json) {
-    return TriggerEvent(
-      title: json['title'],
-      id: json['id'],
-    );
+    return TriggerEvent.fromGenerated(wire.GeneratedAppSelectOption.fromJson(json));
+  }
+
+  factory TriggerEvent.fromGenerated(wire.GeneratedAppSelectOption generated) {
+    return TriggerEvent(title: generated.title, id: generated.id);
   }
 
   toJson() {
-    return {
-      'title': title,
-      'id': id,
-    };
-  }
-
-  static List<TriggerEvent> fromJsonList(List<dynamic> jsonList) {
-    return jsonList.map((e) => TriggerEvent.fromJson(e)).toList();
+    return {'title': title, 'id': id};
   }
 }
 
 class NotificationScope {
   String title;
   String id;
-  NotificationScope({
-    required this.title,
-    required this.id,
-  });
+  NotificationScope({required this.title, required this.id});
 
   factory NotificationScope.fromJson(Map<String, dynamic> json) {
-    return NotificationScope(
-      title: json['title'],
-      id: json['id'],
-    );
+    return NotificationScope.fromGenerated(wire.GeneratedAppSelectOption.fromJson(json));
+  }
+
+  factory NotificationScope.fromGenerated(wire.GeneratedAppSelectOption generated) {
+    return NotificationScope(title: generated.title, id: generated.id);
   }
 
   toJson() {
-    return {
-      'title': title,
-      'id': id,
-    };
-  }
-
-  static List<NotificationScope> fromJsonList(List<dynamic> jsonList) {
-    return jsonList.map((e) => NotificationScope.fromJson(e)).toList();
+    return {'title': title, 'id': id};
   }
 }
 
 class ProactiveNotification {
   List<String> scopes;
 
-  ProactiveNotification({
-    required this.scopes,
-  });
+  ProactiveNotification({required this.scopes});
 
   factory ProactiveNotification.fromJson(Map<String, dynamic> json) {
-    return ProactiveNotification(
-      scopes: json['scopes'].map<String>((e) => e.toString()).toList(),
-    );
+    return ProactiveNotification.fromGenerated(wire.GeneratedProactiveNotification.fromJson(json));
+  }
+
+  factory ProactiveNotification.fromGenerated(wire.GeneratedProactiveNotification generated) {
+    return ProactiveNotification(scopes: generated.scopes);
   }
 
   toJson() {
-    return {
-      'scopes': scopes,
-    };
+    return {'scopes': scopes};
   }
 }
 
@@ -627,27 +787,18 @@ class PaymentPlan {
   final String title;
   final String id;
 
-  PaymentPlan({
-    required this.title,
-    required this.id,
-  });
+  PaymentPlan({required this.title, required this.id});
 
   factory PaymentPlan.fromJson(Map<String, dynamic> json) {
-    return PaymentPlan(
-      title: json['title'],
-      id: json['id'],
-    );
+    return PaymentPlan.fromGenerated(wire.GeneratedAppSelectOption.fromJson(json));
+  }
+
+  factory PaymentPlan.fromGenerated(wire.GeneratedAppSelectOption generated) {
+    return PaymentPlan(title: generated.title, id: generated.id);
   }
 
   toJson() {
-    return {
-      'title': title,
-      'id': id,
-    };
-  }
-
-  static List<PaymentPlan> fromJsonList(List<dynamic> jsonList) {
-    return jsonList.map((e) => PaymentPlan.fromJson(e)).toList();
+    return {'title': title, 'id': id};
   }
 }
 
@@ -657,19 +808,18 @@ class AppApiKey {
   final DateTime createdAt;
   String? secret; // Only available when first created
 
-  AppApiKey({
-    required this.id,
-    required this.label,
-    required this.createdAt,
-    this.secret,
-  });
+  AppApiKey({required this.id, required this.label, required this.createdAt, this.secret});
 
   factory AppApiKey.fromJson(Map<String, dynamic> json) {
+    return AppApiKey.fromGenerated(wire.GeneratedAppApiKeyResponse.fromJson(json));
+  }
+
+  factory AppApiKey.fromGenerated(wire.GeneratedAppApiKeyResponse generated) {
     return AppApiKey(
-      id: json['id'],
-      label: json['label'] ?? 'API Key',
-      createdAt: DateTime.parse(json['created_at']).toLocal(),
-      secret: json['secret'],
+      id: generated.id,
+      label: generated.label,
+      createdAt: generated.createdAt ?? DateTime.fromMillisecondsSinceEpoch(0),
+      secret: generated.secret,
     );
   }
 
@@ -680,9 +830,5 @@ class AppApiKey {
       'created_at': createdAt.toUtc().toIso8601String(),
       if (secret != null) 'secret': secret,
     };
-  }
-
-  static List<AppApiKey> fromJsonList(List<dynamic> jsonList) {
-    return jsonList.map((e) => AppApiKey.fromJson(e)).toList();
   }
 }

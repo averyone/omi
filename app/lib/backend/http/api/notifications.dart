@@ -1,8 +1,9 @@
 import 'dart:convert';
 
-import 'package:flutter/material.dart';
 import 'package:omi/backend/http/shared.dart';
+import 'package:omi/backend/schema/gen/misc_wire.g.dart' as wire;
 import 'package:omi/env/env.dart';
+import 'package:omi/utils/logger.dart';
 
 Future<void> saveFcmTokenServer({required String token, required String timeZone}) async {
   var response = await makeApiCall(
@@ -12,10 +13,11 @@ Future<void> saveFcmTokenServer({required String token, required String timeZone
     body: jsonEncode({'fcm_token': token, 'time_zone': timeZone}),
   );
 
-  debugPrint('saveToken: ${response?.body}');
+  Logger.debug('saveToken: ${response?.body}');
   if (response?.statusCode == 200) {
-    debugPrint("Token saved successfully");
+    final data = wire.GeneratedFcmTokenResponse.fromJson(jsonDecode(response!.body) as Map<String, dynamic>);
+    Logger.debug(data.status == 'Ok' ? "Token saved successfully" : "Token save returned ${data.status}");
   } else {
-    debugPrint("Failed to save token");
+    Logger.debug("Failed to save token");
   }
 }

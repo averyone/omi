@@ -1,19 +1,21 @@
 import 'package:flutter/material.dart';
+
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/utils/alerts/app_snackbar.dart';
+import 'package:omi/utils/l10n_extensions.dart';
 
 class ConversationTimeoutDialog {
   static Future<void> show(BuildContext context) async {
     final currentDuration = SharedPreferencesUtil().conversationSilenceDuration;
     int selectedDuration = currentDuration;
 
-    // Timeout options: 2 mins, 5 mins, 10 mins, 30 mins, never
+    // Timeout options: 2 mins, 5 mins, 10 mins, 30 mins, 4 hours
     final timeoutOptions = [
-      {'label': '2 minutes', 'value': 120, 'description': 'End conversation after 2 minutes of silence'},
-      {'label': '5 minutes', 'value': 300, 'description': 'End conversation after 5 minutes of silence'},
-      {'label': '10 minutes', 'value': 600, 'description': 'End conversation after 10 minutes of silence'},
-      {'label': '30 minutes', 'value': 1800, 'description': 'End conversation after 30 minutes of silence'},
-      {'label': 'Never', 'value': -1, 'description': 'Conversations will only end manually'},
+      {'label': context.l10n.timeout2Minutes, 'value': 120, 'description': context.l10n.timeout2MinutesDesc},
+      {'label': context.l10n.timeout5Minutes, 'value': 300, 'description': context.l10n.timeout5MinutesDesc},
+      {'label': context.l10n.timeout10Minutes, 'value': 600, 'description': context.l10n.timeout10MinutesDesc},
+      {'label': context.l10n.timeout30Minutes, 'value': 1800, 'description': context.l10n.timeout30MinutesDesc},
+      {'label': context.l10n.timeout4Hours, 'value': -1, 'description': context.l10n.timeout4HoursDesc},
     ];
 
     await showDialog(
@@ -24,13 +26,9 @@ class ConversationTimeoutDialog {
             return AlertDialog(
               backgroundColor: const Color(0xFF1A1A1A),
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-              title: const Text(
-                'Conversation Timeout',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 20,
-                  fontWeight: FontWeight.w600,
-                ),
+              title: Text(
+                context.l10n.conversationTimeout,
+                style: const TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.w600),
               ),
               content: SizedBox(
                 width: double.maxFinite,
@@ -38,12 +36,9 @@ class ConversationTimeoutDialog {
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text(
-                      'Choose how long to wait in silence before automatically ending a conversation:',
-                      style: TextStyle(
-                        color: Color(0xFF8E8E93),
-                        fontSize: 14,
-                      ),
+                    Text(
+                      context.l10n.conversationTimeoutDesc,
+                      style: const TextStyle(color: Color(0xFF8E8E93), fontSize: 14),
                     ),
                     const SizedBox(height: 16),
                     ...timeoutOptions.map((option) {
@@ -94,12 +89,7 @@ class ConversationTimeoutDialog {
                                       ],
                                     ),
                                   ),
-                                  if (isSelected)
-                                    const Icon(
-                                      Icons.check_circle,
-                                      color: Colors.white,
-                                      size: 20,
-                                    ),
+                                  if (isSelected) const Icon(Icons.check_circle, color: Colors.white, size: 20),
                                 ],
                               ),
                             ),
@@ -115,10 +105,7 @@ class ConversationTimeoutDialog {
                   onPressed: () {
                     Navigator.of(context).pop();
                   },
-                  child: const Text(
-                    'Cancel',
-                    style: TextStyle(color: Color(0xFF8E8E93)),
-                  ),
+                  child: Text(context.l10n.cancel, style: const TextStyle(color: Color(0xFF8E8E93))),
                 ),
                 TextButton(
                   onPressed: () {
@@ -128,16 +115,16 @@ class ConversationTimeoutDialog {
                     // Show confirmation
                     String message;
                     if (selectedDuration == -1) {
-                      message = 'Conversations will now only end manually';
+                      message = context.l10n.conversationEndAfterHours;
                     } else {
                       final minutes = selectedDuration ~/ 60;
-                      message = 'Conversations will now end after $minutes minute${minutes == 1 ? '' : 's'} of silence';
+                      message = context.l10n.conversationEndAfterMinutes(minutes);
                     }
                     AppSnackbar.showSnackbar(message);
                   },
-                  child: const Text(
-                    'Save',
-                    style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+                  child: Text(
+                    context.l10n.save,
+                    style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
                   ),
                 ),
               ],

@@ -1,9 +1,8 @@
 import 'package:flutter/material.dart';
+
 import 'package:omi/backend/preferences.dart';
-import 'package:gradient_borders/gradient_borders.dart';
-import 'package:intercom_flutter/intercom_flutter.dart';
 import 'package:omi/services/auth_service.dart';
-import 'package:omi/utils/platform/platform_service.dart';
+import 'package:omi/utils/l10n_extensions.dart';
 
 class NameWidget extends StatefulWidget {
   final Function goNext;
@@ -17,16 +16,25 @@ class NameWidget extends StatefulWidget {
 class _NameWidgetState extends State<NameWidget> {
   late TextEditingController nameController;
   var focusNode = FocusNode();
+  bool hasPrefilledName = false;
 
   @override
   void initState() {
     nameController = TextEditingController(text: SharedPreferencesUtil().givenName);
+    hasPrefilledName = SharedPreferencesUtil().givenName.trim().isNotEmpty;
     super.initState();
 
     // Auto-focus the name input field after the widget is built
     // WidgetsBinding.instance.addPostFrameCallback((_) {
     //   focusNode.requestFocus();
     // });
+  }
+
+  @override
+  void dispose() {
+    nameController.dispose();
+    focusNode.dispose();
+    super.dispose();
   }
 
   @override
@@ -44,10 +52,7 @@ class _NameWidgetState extends State<NameWidget> {
           padding: EdgeInsets.fromLTRB(32, 26, 32, MediaQuery.of(context).padding.bottom + 8),
           decoration: const BoxDecoration(
             color: Colors.black,
-            borderRadius: BorderRadius.only(
-              topLeft: Radius.circular(40),
-              topRight: Radius.circular(40),
-            ),
+            borderRadius: BorderRadius.only(topLeft: Radius.circular(40), topRight: Radius.circular(40)),
           ),
           child: SafeArea(
             top: false,
@@ -57,11 +62,11 @@ class _NameWidgetState extends State<NameWidget> {
                 const SizedBox(height: 16),
 
                 // Main title
-                const Text(
-                  'What\'s your name?',
+                Text(
+                  hasPrefilledName ? context.l10n.wantDifferentName : context.l10n.whatsYourName,
                   style: TextStyle(
                     color: Colors.white,
-                    fontSize: 28,
+                    fontSize: hasPrefilledName ? 22 : 28,
                     fontWeight: FontWeight.bold,
                     height: 1.2,
                     fontFamily: 'Manrope',
@@ -75,14 +80,13 @@ class _NameWidgetState extends State<NameWidget> {
                 // Text(
                 //   'Tell us how you\'d like to be addressed.\nThis helps personalize your Omi experience.',
                 //   style: TextStyle(
-                //     color: Colors.white.withOpacity(0.6),
+                //     color: Colors.white.withValues(alpha: 0.6),
                 //     fontSize: 16,
                 //     fontFamily: 'Manrope',
                 //     height: 1.5,
                 //   ),
                 //   textAlign: TextAlign.center,
                 // ),
-
                 const SizedBox(height: 28),
 
                 // Name input field
@@ -90,10 +94,7 @@ class _NameWidgetState extends State<NameWidget> {
                   decoration: BoxDecoration(
                     color: Colors.grey[900],
                     borderRadius: BorderRadius.circular(16),
-                    border: Border.all(
-                      color: Colors.grey[700]!,
-                      width: 1,
-                    ),
+                    border: Border.all(color: Colors.grey[700]!, width: 1),
                   ),
                   child: TextField(
                     controller: nameController,
@@ -106,17 +107,10 @@ class _NameWidgetState extends State<NameWidget> {
                     ),
                     textAlign: TextAlign.center,
                     decoration: InputDecoration(
-                      hintText: 'Enter your name',
-                      hintStyle: TextStyle(
-                        color: Colors.grey[500],
-                        fontSize: 18,
-                        fontFamily: 'Manrope',
-                      ),
+                      hintText: context.l10n.enterYourName,
+                      hintStyle: TextStyle(color: Colors.grey[500], fontSize: 18, fontFamily: 'Manrope'),
                       border: InputBorder.none,
-                      contentPadding: const EdgeInsets.symmetric(
-                        horizontal: 24,
-                        vertical: 20,
-                      ),
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
                     ),
                     onChanged: (value) {
                       setState(() {}); // Trigger rebuild to update button state
@@ -143,18 +137,12 @@ class _NameWidgetState extends State<NameWidget> {
                       foregroundColor: nameController.text.trim().isEmpty ? Colors.grey[600] : Colors.black,
                       disabledBackgroundColor: Colors.grey[800],
                       disabledForegroundColor: Colors.grey[600],
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(28),
-                      ),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
                       elevation: 0,
                     ),
-                    child: const Text(
-                      'Continue',
-                      style: TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.w600,
-                        fontFamily: 'Manrope',
-                      ),
+                    child: Text(
+                      context.l10n.continueButton,
+                      style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600, fontFamily: 'Manrope'),
                     ),
                   ),
                 ),
@@ -170,7 +158,7 @@ class _NameWidgetState extends State<NameWidget> {
                 //         child: Text(
                 //           'Need Help?',
                 //           style: TextStyle(
-                //             color: Colors.white.withOpacity(0.6),
+                //             color: Colors.white.withValues(alpha: 0.6),
                 //             fontSize: 14,
                 //             fontFamily: 'Manrope',
                 //             decoration: TextDecoration.underline,

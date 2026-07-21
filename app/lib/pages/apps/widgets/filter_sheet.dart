@@ -1,7 +1,11 @@
+import 'package:omi/utils/platform/platform_manager.dart';
 import 'package:flutter/material.dart';
-import 'package:omi/providers/app_provider.dart';
-import 'package:omi/utils/analytics/mixpanel.dart';
+
 import 'package:provider/provider.dart';
+
+import 'package:omi/l10n/app_localizations.dart';
+import 'package:omi/providers/app_provider.dart';
+import 'package:omi/utils/app_localizations_helper.dart';
 
 class FilterBottomSheet extends StatelessWidget {
   const FilterBottomSheet({super.key});
@@ -24,50 +28,32 @@ class FilterBottomSheet extends StatelessWidget {
                 child: Row(
                   children: [
                     Text(
-                      'Filters',
-                      style: const TextStyle(
-                        fontSize: 24,
-                        fontWeight: FontWeight.w600,
-                        color: Colors.white,
-                      ),
+                      AppLocalizations.of(context).filters,
+                      style: const TextStyle(fontSize: 24, fontWeight: FontWeight.w600, color: Colors.white),
                     ),
                     if (provider.filters.isNotEmpty) ...[
                       const SizedBox(width: 8),
                       Container(
                         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                        decoration: BoxDecoration(
-                          color: Color(0xFF8B5CF6),
-                          borderRadius: BorderRadius.circular(12),
-                        ),
+                        decoration: BoxDecoration(color: Color(0xFF8B5CF6), borderRadius: BorderRadius.circular(12)),
                         child: Text(
                           '${provider.filters.length}',
-                          style: const TextStyle(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w600,
-                            color: Colors.white,
-                          ),
+                          style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Colors.white),
                         ),
                       ),
                     ],
                     const Spacer(),
                     IconButton(
+                      key: const ValueKey('filter_sheet_close_button'),
                       onPressed: () => Navigator.of(context).pop(),
-                      icon: const Icon(
-                        Icons.close,
-                        color: Colors.white,
-                        size: 24,
-                      ),
+                      icon: const Icon(Icons.close, color: Colors.white, size: 24),
                     ),
                   ],
                 ),
               ),
 
               // Divider
-              Container(
-                margin: const EdgeInsets.symmetric(vertical: 16),
-                height: 1,
-                color: Color(0xFF35343B),
-              ),
+              Container(margin: const EdgeInsets.symmetric(vertical: 16), height: 1, color: Color(0xFF35343B)),
 
               // Content
               Expanded(
@@ -76,55 +62,31 @@ class FilterBottomSheet extends StatelessWidget {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      // App Type Toggle
-                      _buildSectionTitle('App Type'),
-                      const SizedBox(height: 12),
-                      _buildToggleOption(
-                        'Show my apps',
-                        provider.isFilterSelected('My Apps', 'Apps'),
-                        () {
-                          provider.addOrRemoveFilter('My Apps', 'Apps');
-                          MixpanelManager().appsTypeFilter('My Apps', provider.isFilterSelected('My Apps', 'Apps'));
-                        },
-                      ),
-                      const SizedBox(height: 8),
-                      _buildToggleOption(
-                        'Show installed apps',
-                        provider.isFilterSelected('Installed Apps', 'Apps'),
-                        () {
-                          provider.addOrRemoveFilter('Installed Apps', 'Apps');
-                          MixpanelManager()
-                              .appsTypeFilter('Installed Apps', provider.isFilterSelected('Installed Apps', 'Apps'));
-                        },
-                      ),
-
-                      const SizedBox(height: 32),
-
                       // Rating
-                      _buildSectionTitle('Rating'),
+                      _buildSectionTitle(AppLocalizations.of(context).rating),
                       const SizedBox(height: 12),
                       _buildRatingSelector(provider),
 
                       const SizedBox(height: 32),
 
                       // Categories
-                      _buildSectionTitle('Categories'),
+                      _buildSectionTitle(AppLocalizations.of(context).categories),
                       const SizedBox(height: 12),
-                      _buildCategoryChips(provider),
+                      _buildCategoryChips(context, provider),
 
                       const SizedBox(height: 32),
 
                       // Sort Options
-                      _buildSectionTitle('Sort'),
+                      _buildSectionTitle(AppLocalizations.of(context).sortBy),
                       const SizedBox(height: 12),
-                      _buildSortOptions(provider),
+                      _buildSortOptions(context, provider),
 
                       const SizedBox(height: 32),
 
                       // Capabilities
-                      _buildSectionTitle('Capabilities'),
+                      _buildSectionTitle(AppLocalizations.of(context).capabilities),
                       const SizedBox(height: 12),
-                      _buildCapabilities(provider),
+                      _buildCapabilities(context, provider),
 
                       const SizedBox(height: 100), // Extra space for bottom buttons
                     ],
@@ -137,17 +99,18 @@ class FilterBottomSheet extends StatelessWidget {
                 padding: const EdgeInsets.fromLTRB(20, 20, 20, 40),
                 decoration: BoxDecoration(
                   color: const Color(0xFF1C1C1E),
-                  border: Border(
-                    top: BorderSide(color: Color(0xFF35343B), width: 1),
-                  ),
+                  border: Border(top: BorderSide(color: Color(0xFF35343B), width: 1)),
                 ),
                 child: Row(
                   children: [
                     Expanded(
                       child: TextButton(
+                        key: const ValueKey('filter_sheet_reset_button'),
                         onPressed: () {
                           provider.clearFilters();
-                          MixpanelManager().appsClearFilters();
+                          PlatformManager.instance.analytics.appsClearFilters();
+                          Navigator.of(context).pop();
+                          Future.microtask(() => provider.applyFilters());
                         },
                         style: TextButton.styleFrom(
                           padding: const EdgeInsets.symmetric(vertical: 16),
@@ -156,37 +119,28 @@ class FilterBottomSheet extends StatelessWidget {
                             side: BorderSide(color: Colors.grey.shade600),
                           ),
                         ),
-                        child: const Text(
-                          'Reset filters',
-                          style: TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.w500,
-                            color: Colors.white,
-                          ),
+                        child: Text(
+                          AppLocalizations.of(context).resetFilters,
+                          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w500, color: Colors.white),
                         ),
                       ),
                     ),
                     const SizedBox(width: 16),
                     Expanded(
                       child: ElevatedButton(
+                        key: const ValueKey('filter_sheet_apply_button'),
                         onPressed: () {
-                          provider.filterApps();
                           Navigator.of(context).pop();
+                          Future.microtask(() => provider.applyFilters());
                         },
                         style: ElevatedButton.styleFrom(
                           backgroundColor: Colors.white,
                           padding: const EdgeInsets.symmetric(vertical: 16),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                         ),
-                        child: const Text(
-                          'Apply filters',
-                          style: TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.w600,
-                            color: Colors.black,
-                          ),
+                        child: Text(
+                          AppLocalizations.of(context).applyFilters,
+                          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: Colors.black),
                         ),
                       ),
                     ),
@@ -203,43 +157,7 @@ class FilterBottomSheet extends StatelessWidget {
   Widget _buildSectionTitle(String title) {
     return Text(
       title,
-      style: const TextStyle(
-        fontSize: 18,
-        fontWeight: FontWeight.w600,
-        color: Colors.white,
-      ),
-    );
-  }
-
-  Widget _buildToggleOption(String title, bool isSelected, VoidCallback onTap) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-        decoration: BoxDecoration(
-          color: const Color(0xFF1F1F25).withOpacity(0.5),
-          borderRadius: BorderRadius.circular(12),
-        ),
-        child: Row(
-          children: [
-            Text(
-              title,
-              style: const TextStyle(
-                fontSize: 16,
-                color: Colors.white,
-              ),
-            ),
-            const Spacer(),
-            Switch(
-              value: isSelected,
-              onChanged: (value) => onTap(),
-              activeColor: Color(0xFF8B5CF6),
-              inactiveThumbColor: Colors.grey.shade400,
-              inactiveTrackColor: Colors.grey.shade700,
-            ),
-          ],
-        ),
-      ),
+      style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: Colors.white),
     );
   }
 
@@ -255,7 +173,10 @@ class FilterBottomSheet extends StatelessWidget {
           child: GestureDetector(
             onTap: () {
               provider.addOrRemoveFilter(filterKey, 'Rating');
-              MixpanelManager().appsRatingFilter(filterKey, provider.isFilterSelected(filterKey, 'Rating'));
+              PlatformManager.instance.analytics.appsRatingFilter(
+                filterKey,
+                provider.isFilterSelected(filterKey, 'Rating'),
+              );
             },
             child: Container(
               margin: const EdgeInsets.only(right: 8),
@@ -266,7 +187,7 @@ class FilterBottomSheet extends StatelessWidget {
               ),
               child: Center(
                 child: Text(
-                  rating,
+                  '$rating+',
                   style: TextStyle(
                     fontSize: 16,
                     fontWeight: FontWeight.w600,
@@ -281,7 +202,7 @@ class FilterBottomSheet extends StatelessWidget {
     );
   }
 
-  Widget _buildCategoryChips(AppProvider provider) {
+  Widget _buildCategoryChips(BuildContext context, AppProvider provider) {
     return Wrap(
       spacing: 8,
       runSpacing: 8,
@@ -291,18 +212,21 @@ class FilterBottomSheet extends StatelessWidget {
         return GestureDetector(
           onTap: () {
             provider.addOrRemoveCategoryFilter(category);
-            MixpanelManager().appsCategoryFilter(category.title, provider.isCategoryFilterSelected(category));
+            PlatformManager.instance.analytics.appsCategoryFilter(
+              category.title,
+              provider.isCategoryFilterSelected(category),
+            );
           },
           child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
             decoration: BoxDecoration(
               color: isSelected ? Color(0xFF8B5CF6) : Color(0xFF35343B),
               borderRadius: BorderRadius.circular(20),
             ),
             child: Text(
-              category.title,
+              category.getLocalizedTitle(context),
               style: TextStyle(
-                fontSize: 14,
+                fontSize: 13,
                 fontWeight: FontWeight.w500,
                 color: isSelected ? Colors.white : Colors.grey.shade300,
               ),
@@ -313,12 +237,14 @@ class FilterBottomSheet extends StatelessWidget {
     );
   }
 
-  Widget _buildSortOptions(AppProvider provider) {
+  Widget _buildSortOptions(BuildContext context, AppProvider provider) {
+    final l10n = AppLocalizations.of(context);
     final sortOptions = [
       {'label': 'A-Z', 'key': 'A-Z'},
       {'label': 'Z-A', 'key': 'Z-A'},
-      {'label': 'Highest Rating', 'key': 'Highest Rating'},
-      {'label': 'Lowest Rating', 'key': 'Lowest Rating'},
+      {'label': l10n.highestRating, 'key': 'Highest Rating'},
+      {'label': l10n.lowestRating, 'key': 'Lowest Rating'},
+      {'label': l10n.mostInstalls, 'key': 'Most Installs'},
     ];
 
     return Column(
@@ -330,12 +256,15 @@ class FilterBottomSheet extends StatelessWidget {
           child: GestureDetector(
             onTap: () {
               provider.addOrRemoveFilter(option['key']!, 'Sort');
-              MixpanelManager().appsSortFilter(option['key']!, provider.isFilterSelected(option['key']!, 'Sort'));
+              PlatformManager.instance.analytics.appsSortFilter(
+                option['key']!,
+                provider.isFilterSelected(option['key']!, 'Sort'),
+              );
             },
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
               decoration: BoxDecoration(
-                color: const Color(0xFF1F1F25).withOpacity(0.5),
+                color: const Color(0xFF1F1F25).withValues(alpha: 0.5),
                 borderRadius: BorderRadius.circular(12),
                 border: isSelected ? Border.all(color: Color(0xFF8B5CF6), width: 2) : null,
               ),
@@ -347,18 +276,9 @@ class FilterBottomSheet extends StatelessWidget {
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
                       color: isSelected ? Color(0xFF8B5CF6) : Colors.transparent,
-                      border: Border.all(
-                        color: isSelected ? Color(0xFF8B5CF6) : Colors.grey.shade500,
-                        width: 2,
-                      ),
+                      border: Border.all(color: isSelected ? Color(0xFF8B5CF6) : Colors.grey.shade500, width: 2),
                     ),
-                    child: isSelected
-                        ? const Icon(
-                            Icons.check,
-                            size: 12,
-                            color: Colors.white,
-                          )
-                        : null,
+                    child: isSelected ? const Icon(Icons.check, size: 12, color: Colors.white) : null,
                   ),
                   const SizedBox(width: 12),
                   Text(
@@ -378,55 +298,33 @@ class FilterBottomSheet extends StatelessWidget {
     );
   }
 
-  Widget _buildCapabilities(AppProvider provider) {
-    return Column(
+  Widget _buildCapabilities(BuildContext context, AppProvider provider) {
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
       children: provider.capabilities.map((capability) {
         final isSelected = provider.isCapabilityFilterSelected(capability);
 
-        return Container(
-          margin: const EdgeInsets.only(bottom: 8),
-          child: GestureDetector(
-            onTap: () {
-              provider.addOrRemoveCapabilityFilter(capability);
-              MixpanelManager().appsCapabilityFilter(capability.title, provider.isCapabilityFilterSelected(capability));
-            },
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-              decoration: BoxDecoration(
-                color: const Color(0xFF1F1F25).withOpacity(0.5),
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Row(
-                children: [
-                  Container(
-                    width: 20,
-                    height: 20,
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(4),
-                      color: isSelected ? Color(0xFF8B5CF6) : Colors.transparent,
-                      border: Border.all(
-                        color: isSelected ? Color(0xFF8B5CF6) : Colors.grey.shade500,
-                        width: 2,
-                      ),
-                    ),
-                    child: isSelected
-                        ? const Icon(
-                            Icons.check,
-                            size: 12,
-                            color: Colors.white,
-                          )
-                        : null,
-                  ),
-                  const SizedBox(width: 12),
-                  Text(
-                    capability.title,
-                    style: TextStyle(
-                      fontSize: 16,
-                      color: isSelected ? Colors.white : Colors.grey.shade300,
-                      fontWeight: isSelected ? FontWeight.w500 : FontWeight.normal,
-                    ),
-                  ),
-                ],
+        return GestureDetector(
+          onTap: () {
+            provider.addOrRemoveCapabilityFilter(capability);
+            PlatformManager.instance.analytics.appsCapabilityFilter(
+              capability.title,
+              provider.isCapabilityFilterSelected(capability),
+            );
+          },
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            decoration: BoxDecoration(
+              color: isSelected ? Color(0xFF8B5CF6) : Color(0xFF35343B),
+              borderRadius: BorderRadius.circular(20),
+            ),
+            child: Text(
+              capability.getLocalizedTitle(context),
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w500,
+                color: isSelected ? Colors.white : Colors.grey.shade300,
               ),
             ),
           ),

@@ -1,5 +1,7 @@
 import 'dart:typed_data';
+
 import 'package:image/image.dart' as img;
+
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/services/devices/models.dart';
 
@@ -33,7 +35,6 @@ Uint8List rotateImage(OrientedImage orientedImage) {
       rotatedImage = img.copyRotate(image, angle: -90);
       break;
     case ImageOrientation.orientation0:
-    default:
       // No rotation needed
       return orientedImage.imageBytes;
   }

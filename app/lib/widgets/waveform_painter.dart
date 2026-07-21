@@ -1,5 +1,5 @@
-import 'dart:math';
 import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
 class WaveformPainter extends CustomPainter {
@@ -7,11 +7,7 @@ class WaveformPainter extends CustomPainter {
   final List<double>? waveformData;
   final double playbackProgress;
 
-  const WaveformPainter({
-    required this.isPlaying,
-    this.waveformData,
-    this.playbackProgress = 0.0,
-  });
+  const WaveformPainter({required this.isPlaying, this.waveformData, this.playbackProgress = 0.0});
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -63,9 +59,6 @@ class WaveformPainter extends CustomPainter {
       final height = amplitude * size.height;
       final centerY = size.height / 2;
 
-      // Draw waveform bar from center, extending both up and down
-      final halfHeight = height / 2;
-
       final progressBarIndex = (barCount * playbackProgress).floor();
       final useActivePaint = isPlaying && i <= progressBarIndex;
 
@@ -98,14 +91,10 @@ class WaveformPainter extends CustomPainter {
 
       // Draw a subtle vertical line from dot to waveform
       final linePaint = Paint()
-        ..color = const Color(0xFF4A90E2).withOpacity(0.5)
+        ..color = const Color(0xFF4A90E2).withValues(alpha: 0.5)
         ..strokeWidth = 1.0;
 
-      canvas.drawLine(
-        Offset(progressX, size.height * 0.05 + 6),
-        Offset(progressX, size.height * 0.95),
-        linePaint,
-      );
+      canvas.drawLine(Offset(progressX, size.height * 0.05 + 6), Offset(progressX, size.height * 0.95), linePaint);
     }
   }
 
@@ -120,11 +109,7 @@ class WaveformPainter extends CustomPainter {
   ) {
     // Paint a single center line when no waveform data is available
     final centerY = size.height / 2;
-    canvas.drawLine(
-      Offset(0, centerY),
-      Offset(size.width, centerY),
-      paint..strokeWidth = 1,
-    );
+    canvas.drawLine(Offset(0, centerY), Offset(size.width, centerY), paint..strokeWidth = 1);
   }
 
   @override

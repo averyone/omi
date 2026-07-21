@@ -1,13 +1,17 @@
-// Re-export the main notification service for backward compatibility
-// All notification functionality is now handled by the platform-aware service
-
 import 'dart:isolate';
 import 'dart:ui';
 
-import 'package:awesome_notifications/awesome_notifications.dart';
 import 'package:flutter/material.dart';
-import 'package:omi/main.dart';
+
+import 'package:awesome_notifications/awesome_notifications.dart';
+
+import 'package:omi/app_globals.dart';
 import 'package:omi/pages/home/page.dart';
+import 'package:omi/utils/l10n_extensions.dart';
+import 'package:omi/utils/logger.dart';
+
+// Re-export the main notification service for backward compatibility
+// All notification functionality is now handled by the platform-aware service
 
 export 'package:omi/services/notifications/notification_service.dart';
 
@@ -37,7 +41,8 @@ class NotificationUtil {
       await onActionReceivedMethodImpl(receivedAction);
     } else {
       print(
-          'onActionReceivedMethod was called inside a parallel dart isolate, where receivePort was never initialized.');
+        'onActionReceivedMethod was called inside a parallel dart isolate, where receivePort was never initialized.',
+      );
       SendPort? sendPort = IsolateNameServer.lookupPortByName('notification_action_port');
 
       if (sendPort != null) {
@@ -56,8 +61,6 @@ class NotificationUtil {
   }
 
   static void _handleAppLinkOrDeepLink(Map<String, dynamic> payload) async {
-    // Always ensure that all plugins was initialized
-    // TODO: for what?
     WidgetsFlutterBinding.ensureInitialized();
 
     String? navigateTo;
@@ -65,11 +68,29 @@ class NotificationUtil {
       navigateTo = payload['navigate_to'];
     }
     if (navigateTo == null) {
-      debugPrint("Navigate To is null");
+      Logger.debug("Navigate To is null");
       return;
     }
 
-    MyApp.navigatorKey.currentState
-        ?.pushReplacement(MaterialPageRoute(builder: (context) => HomePageWrapper(navigateToRoute: navigateTo)));
+    globalNavigatorKey.currentState?.pushReplacement(
+      MaterialPageRoute(builder: (context) => HomePageWrapper(navigateToRoute: navigateTo)),
+    );
+  }
+
+  static Future<void> triggerFallNotification() async {
+    final allowed = await AwesomeNotifications().isNotificationAllowed();
+    if (!allowed) return;
+
+    final ctx = globalNavigatorKey.currentContext;
+    await AwesomeNotifications().createNotification(
+      content: NotificationContent(
+        id: 6,
+        channelKey: 'channel',
+        actionType: ActionType.Default,
+        title: ctx?.l10n.fallNotificationTitle ?? 'Ouch',
+        body: ctx?.l10n.fallNotificationBody ?? 'Did you fall?',
+        wakeUpScreen: true,
+      ),
+    );
   }
 }

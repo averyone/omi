@@ -1,10 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:omi/gen/assets.gen.dart';
-import 'package:omi/providers/onboarding_provider.dart';
-import 'package:omi/widgets/dialog.dart';
+
 import 'package:permission_handler/permission_handler.dart';
 import 'package:provider/provider.dart';
+
+import 'package:omi/gen/assets.gen.dart';
+import 'package:omi/providers/onboarding_provider.dart';
+import 'package:omi/utils/l10n_extensions.dart';
+import 'package:omi/widgets/dialog.dart';
 
 class WelcomePage extends StatefulWidget {
   final VoidCallback goNext;
@@ -34,63 +37,43 @@ class _WelcomePageState extends State<WelcomePage> with TickerProviderStateMixin
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.manual, overlays: []);
 
     // Initialize arrow animations for both buttons
-    _arrowController1 = AnimationController(
-      duration: const Duration(milliseconds: 600),
-      vsync: this,
-    )..repeat(reverse: true);
+    _arrowController1 = AnimationController(duration: const Duration(milliseconds: 600), vsync: this)
+      ..repeat(reverse: true);
 
-    _arrowController2 = AnimationController(
-      duration: const Duration(milliseconds: 600),
-      vsync: this,
-    )..repeat(reverse: true);
+    _arrowController2 = AnimationController(duration: const Duration(milliseconds: 600), vsync: this)
+      ..repeat(reverse: true);
 
     // Initialize expansion animation
-    _expansionController = AnimationController(
-      duration: const Duration(milliseconds: 800),
-      vsync: this,
-    );
+    _expansionController = AnimationController(duration: const Duration(milliseconds: 800), vsync: this);
 
     _arrowAnimation1 = Tween<double>(
       begin: 0,
       end: 4,
-    ).animate(CurvedAnimation(
-      parent: _arrowController1,
-      curve: Curves.easeInOut,
-    ));
+    ).animate(CurvedAnimation(parent: _arrowController1, curve: Curves.easeInOut));
 
     _arrowAnimation2 = Tween<double>(
       begin: 0,
       end: 4,
-    ).animate(CurvedAnimation(
-      parent: _arrowController2,
-      curve: Curves.easeInOut,
-    ));
+    ).animate(CurvedAnimation(parent: _arrowController2, curve: Curves.easeInOut));
 
     _expansionAnimation = Tween<double>(
       begin: 0.5,
       end: 1.0,
-    ).animate(CurvedAnimation(
-      parent: _expansionController,
-      curve: Curves.easeInOut,
-    ));
+    ).animate(CurvedAnimation(parent: _expansionController, curve: Curves.easeInOut));
 
     // Fade to black animation (starts at 0, goes to 1)
     _fadeToBlackAnimation = Tween<double>(
       begin: 0.0,
       end: 1.0,
-    ).animate(CurvedAnimation(
-      parent: _expansionController,
-      curve: Curves.easeInOut,
-    ));
+    ).animate(CurvedAnimation(parent: _expansionController, curve: Curves.easeInOut));
 
     // Button fade animation (1 to 0 - fade out buttons)
-    _buttonFadeAnimation = Tween<double>(
-      begin: 1.0,
-      end: 0.0,
-    ).animate(CurvedAnimation(
-      parent: _expansionController,
-      curve: const Interval(0.0, 0.3, curve: Curves.easeOut),
-    ));
+    _buttonFadeAnimation = Tween<double>(begin: 1.0, end: 0.0).animate(
+      CurvedAnimation(
+        parent: _expansionController,
+        curve: const Interval(0.0, 0.3, curve: Curves.easeOut),
+      ),
+    );
   }
 
   @override
@@ -127,22 +110,24 @@ class _WelcomePageState extends State<WelcomePage> with TickerProviderStateMixin
       });
       _expansionController.reset();
 
-      showDialog(
-        context: context,
-        builder: (c) => getDialog(
-          context,
-          () {
-            Navigator.of(context).pop();
-            openAppSettings();
-          },
-          () {},
-          'Permissions Required',
-          'This app needs Bluetooth and Location permissions to function properly. Please enable them in the settings.',
-          okButtonText: 'Open Settings',
-          singleButton: true,
-        ),
-        barrierDismissible: false,
-      );
+      if (mounted) {
+        showDialog(
+          context: context,
+          builder: (c) => getDialog(
+            context,
+            () {
+              Navigator.of(context).pop();
+              openAppSettings();
+            },
+            () {},
+            context.l10n.permissionsRequired,
+            context.l10n.permissionsRequiredDesc,
+            okButtonText: context.l10n.openSettings,
+            singleButton: true,
+          ),
+          barrierDismissible: false,
+        );
+      }
     }
   }
 
@@ -192,14 +177,10 @@ class _WelcomePageState extends State<WelcomePage> with TickerProviderStateMixin
                         child: Stack(
                           children: [
                             // Dim overlay
-                            Container(
-                              color: Colors.black.withOpacity(0.4),
-                            ),
+                            Container(color: Colors.black.withValues(alpha: 0.4)),
                             // Fade to black overlay (increases during expansion)
                             if (_isExpandingTop)
-                              Container(
-                                color: Colors.black.withOpacity(_fadeToBlackAnimation.value * 0.9),
-                              ),
+                              Container(color: Colors.black.withValues(alpha: _fadeToBlackAnimation.value * 0.9)),
                             // Content positioned in lower half
                             Positioned(
                               bottom: 60,
@@ -215,16 +196,16 @@ class _WelcomePageState extends State<WelcomePage> with TickerProviderStateMixin
                                     child: InkWell(
                                       onTap: _handleTopButtonPress,
                                       borderRadius: BorderRadius.circular(28),
-                                      splashColor: Colors.green.withOpacity(0.7),
-                                      highlightColor: Colors.green.withOpacity(0.1),
+                                      splashColor: Colors.green.withValues(alpha: 0.7),
+                                      highlightColor: Colors.green.withValues(alpha: 0.1),
                                       child: Container(
                                         padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
                                         child: Row(
                                           mainAxisSize: MainAxisSize.min,
                                           children: [
-                                            const Text(
-                                              'Connect Omi / OmiGlass',
-                                              style: TextStyle(
+                                            Text(
+                                              context.l10n.connectOmiOmiGlass,
+                                              style: const TextStyle(
                                                 color: Colors.black87,
                                                 fontSize: 18,
                                                 fontWeight: FontWeight.w600,
@@ -281,9 +262,7 @@ class _WelcomePageState extends State<WelcomePage> with TickerProviderStateMixin
                           child: Stack(
                             children: [
                               // Dim overlay
-                              Container(
-                                color: Colors.black.withOpacity(0.5),
-                              ),
+                              Container(color: Colors.black.withValues(alpha: 0.5)),
 
                               // Content positioned in lower half
                               Positioned(
@@ -299,8 +278,8 @@ class _WelcomePageState extends State<WelcomePage> with TickerProviderStateMixin
                                       child: InkWell(
                                         onTap: _handleBottomButtonPress,
                                         borderRadius: BorderRadius.circular(28),
-                                        splashColor: Colors.green.withOpacity(0.7),
-                                        highlightColor: Colors.green.withOpacity(0.1),
+                                        splashColor: Colors.green.withValues(alpha: 0.7),
+                                        highlightColor: Colors.green.withValues(alpha: 0.1),
                                         child: Container(
                                           padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
                                           decoration: BoxDecoration(
@@ -310,9 +289,9 @@ class _WelcomePageState extends State<WelcomePage> with TickerProviderStateMixin
                                           child: Row(
                                             mainAxisSize: MainAxisSize.min,
                                             children: [
-                                              const Text(
-                                                'Continue Without Device',
-                                                style: TextStyle(
+                                              Text(
+                                                context.l10n.continueWithoutDevice,
+                                                style: const TextStyle(
                                                   color: Colors.white,
                                                   fontSize: 18,
                                                   fontWeight: FontWeight.w600,

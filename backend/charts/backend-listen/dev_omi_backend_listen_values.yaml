@@ -1,3 +1,4 @@
+progressDeadlineSeconds: 1800
 # Default values for backend-listen.
 # This is a YAML-formatted file.
 # Declare variables to be passed into your templates.
@@ -8,10 +9,14 @@ replicaCount: 1
 # This sets the container image more information can be found here: https://kubernetes.io/docs/concepts/containers/images/
 image:
   repository: gcr.io/based-hardware-dev/backend
+  digest: ""
   # This sets the pull policy for images.
   pullPolicy: Always
-  # Overrides the image tag whose default is the chart appVersion.
-  tag: "latest"
+  # Build-specific; CI/manual deploy must pass --set-string image.tag=<short-sha>.
+  tag: ""
+
+gcpProjectId: based-hardware-dev
+runtimeGcpProjectId: based-hardware-dev
 
 # This is for the secrets for pulling an image from a private repository more information can be found here: https://kubernetes.io/docs/tasks/configure-pod-container/pull-image-private-registry/
 imagePullSecrets: []
@@ -33,7 +38,10 @@ serviceAccount:
 
 # This is for setting Kubernetes Annotations to a Pod.
 # For more information checkout: https://kubernetes.io/docs/concepts/overview/working-with-objects/annotations/
-podAnnotations: {}
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "8080"
+  prometheus.io/path: "/metrics"
 # This is for setting Kubernetes Labels to a Pod.
 # For more information checkout: https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/
 podLabels: {}
@@ -75,12 +83,27 @@ ingress:
   #    hosts:
   #      - chart-example.local
 
+envFrom:
+  - configMapRef:
+      name: dev-omi-backend-config
+
 env:
-  - name: DEEPGRAM_API_KEY
+  - name: DESKTOP_UPDATE_POINTERS_MODE
+    value: "primary"
+  - name: DESKTOP_UPDATE_RECONCILE_SAMPLE_RATE
+    value: "0.01"
+  - name: USE_VERTEX_AI
+    value: "true"
+  - name: GEMINI_API_KEY
     valueFrom:
       secretKeyRef:
         name: dev-omi-backend-secrets
-        key: DEEPGRAM_API_KEY
+        key: GEMINI_API_KEY
+  - name: MODULATE_API_KEY
+    valueFrom:
+      secretKeyRef:
+        name: dev-omi-backend-secrets
+        key: MODULATE_API_KEY
   - name: FAL_KEY
     valueFrom:
       secretKeyRef:
@@ -91,29 +114,73 @@ env:
       secretKeyRef:
         name: dev-omi-backend-secrets
         key: OPENAI_API_KEY
+  - name: OMI_LLM_GATEWAY_URL
+    value: "http://dev-omi-llm-gateway.dev-omi-backend.svc.cluster.local:8080"
+  - name: OMI_ENV_STAGE
+    value: "dev"
+  - name: OMI_LLM_GATEWAY_FEATURE_MODE
+    value: "gateway"
+  - name: PUBLIC_SHARED_CONVERSATION_CHAT_MODE
+    value: "off"
+  - name: OMI_LLM_GATEWAY_ALLOW_DIRECT_MODEL_EXCEPTION
+    value: "true"
+  - name: OMI_LLM_GATEWAY_CONVERSATION_STRUCTURE_SHADOW_ENABLED
+    value: "false"
+  - name: OMI_LLM_GATEWAY_CONVERSATION_STRUCTURE_SHADOW_SAMPLE_RATE
+    value: "1.0"
+  - name: OMI_LLM_GATEWAY_CONVERSATION_ACTION_ITEMS_SHADOW_ENABLED
+    value: "false"
+  - name: OMI_LLM_GATEWAY_CONVERSATION_ACTION_ITEMS_SHADOW_SAMPLE_RATE
+    value: "1.0"
+  - name: OMI_LLM_GATEWAY_DEV_SHADOW_ALL_ENABLED
+    value: "false"
+  - name: OMI_LLM_GATEWAY_DEV_SHADOW_ALL_SAMPLE_RATE
+    value: "1.0"
+  - name: OMI_LLM_GATEWAY_SERVICE_TOKEN
+    valueFrom:
+      secretKeyRef:
+        name: dev-omi-backend-secrets
+        key: OMI_LLM_GATEWAY_SERVICE_TOKEN
+  - name: MEMORY_MODE
+    value: "read"
+  - name: MEMORY_ENABLED_USERS
+    # Next dogfood (re-enable soon): ,viUv7GtdoHXbK1UBCDlPuTDuPgJ2
+    value: "vi7SA9ckQCe4ccobWNxlbdcNdC23"
+  - name: MEMORY_V3_GET_ENABLED
+    value: "true"
+  - name: MEMORY_CANONICAL_PROMOTION_CRON_ENABLED
+    value: "false"
+  - name: MEMORY_CANONICAL_PROMOTION_FAST_TRACK_ENABLED
+    value: "true"
   - name: GOOGLE_MAPS_API_KEY
     valueFrom:
       secretKeyRef:
         name: dev-omi-backend-secrets
         key: GOOGLE_MAPS_API_KEY
+  - name: GOOGLE_CLIENT_SECRET
+    valueFrom:
+      secretKeyRef:
+        name: dev-omi-backend-secrets
+        key: GOOGLE_CLIENT_SECRET
   - name: GITHUB_TOKEN
     valueFrom:
       secretKeyRef:
         name: dev-omi-backend-secrets
         key: GITHUB_TOKEN
-  - name: SONIOX_API_KEY
-    valueFrom:
-      secretKeyRef:
-        name: dev-omi-backend-secrets
-        key: SONIOX_API_KEY
   - name: BUCKET_SPEECH_PROFILES
     value: "speech-profiles-dev"
   - name: BUCKET_TEMPORAL_SYNC_LOCAL
     value: "syncing-local-development"
   - name: HOSTED_VAD_API_URL
-    value: "http://34.172.155.20:80/v1/vad"
+    value: "http://vad.omiapi.com:80/v1/vad"
   - name: HOSTED_SPEECH_PROFILE_API_URL
-    value: "http://34.172.155.20:80/v1/speaker-identification"
+    value: "http://vad.omiapi.com:80/v1/speaker-identification"
+  - name: HOSTED_SPEAKER_EMBEDDING_API_URL
+    value: "http://diarizer.omiapi.com:80"
+  - name: HOSTED_TRANSLATION_API_URL
+    value: "http://nllb.omiapi.com"
+  - name: TRANSLATION_SERVICE_MODELS
+    value: "nllb,google"
   - name: PINECONE_API_KEY
     valueFrom:
       secretKeyRef:
@@ -121,13 +188,8 @@ env:
         key: PINECONE_API_KEY
   - name: PINECONE_INDEX_NAME
     value: "memories-backend-dev"
-  - name: REDIS_DB_HOST
-    valueFrom:
-      secretKeyRef:
-        name: dev-omi-backend-secrets
-        key: REDIS_DB_HOST
   - name: REDIS_DB_PORT
-    value: "10797"
+    value: "13151"
   - name: REDIS_DB_PASSWORD
     valueFrom:
       secretKeyRef:
@@ -138,15 +200,16 @@ env:
       secretKeyRef:
         name: dev-omi-backend-secrets
         key: ADMIN_KEY
-  - name: WORKFLOW_API_KEY
-    valueFrom:
-      secretKeyRef:
-        name: dev-omi-backend-secrets
-        key: WORKFLOW_API_KEY
+  - name: HOSTED_PARAKEET_API_URL
+    value: "http://parakeet.omiapi.com"
+  - name: STT_PRERECORDED_MODEL
+    value: "modulate-velma-2,parakeet"
+  - name: STT_SERVICE_MODELS
+    value: "modulate-velma-2,parakeet"
   - name: NO_SOCKET_TIMEOUT
     value: "true"
   - name: HOSTED_PUSHER_API_URL
-    value: "http://internal-alb.pusher-ep-dev.il7.us-central1.lb.based-hardware-dev.internal"
+    value: "http://pusher.omiapi.com"
   - name: BUCKET_PLUGINS_LOGOS
     value: "plugin_resources"
   - name: GOOGLE_APPLICATION_CREDENTIALS
@@ -201,11 +264,6 @@ env:
       secretKeyRef:
         name: dev-omi-backend-secrets
         key: MARKETPLACE_APP_REVIEWERS
-  - name: TYPESENSE_HOST
-    valueFrom:
-      secretKeyRef:
-        name: dev-omi-backend-secrets
-        key: TYPESENSE_HOST
   - name: TYPESENSE_HOST_PORT
     value: "443"
   - name: TYPESENSE_API_KEY
@@ -213,26 +271,115 @@ env:
       secretKeyRef:
         name: dev-omi-backend-secrets
         key: TYPESENSE_API_KEY
-  - name: DEEPGRAM_SELF_HOSTED_ENABLED
-    value: "false"
-  - name: DEEPGRAM_SELF_HOSTED_URL
-    value: "https://dg.omiapi.com"
+  - name: MEMORY_TYPESENSE_COLLECTION
+    value: "canonical_memory_atoms"
   - name: ENCRYPTION_SECRET
-    value: "omi_ZwB2ZNqB2HHpMK6wStk7sTpavJiPTFg7gXUHnc4tFABPU6pZ2c2DKgehtfgi4RZv"
+    valueFrom:
+      secretKeyRef:
+        name: dev-omi-backend-secrets
+        key: ENCRYPTION_SECRET
   - name: BASIC_TIER_MINUTES_LIMIT_PER_MONTH
     value: "1000000"
   - name: BASIC_TIER_WORDS_TRANSCRIBED_LIMIT_PER_MONTH
     value: "0"
   - name: BASIC_TIER_INSIGHTS_GAINED_LIMIT_PER_MONTH
     value: "0"
-  - name: BASIC_TIER_MEMORIES_CREATED_LIMIT_PER_MONTH
-    value: "0"
   - name: STRIPE_UNLIMITED_MONTHLY_PRICE_ID
     value: "price_1RrxXL1F8wnoWYvwIddzR902"
   - name: STRIPE_UNLIMITED_ANNUAL_PRICE_ID
     value: "price_1RrxXL1F8wnoWYvw3kDbWmjs"
+  - name: STRIPE_ARCHITECT_MONTHLY_PRICE_ID
+    value: "price_1TLFXK1F8wnoWYvwG1TaUkZ3"
+  - name: STRIPE_ARCHITECT_ANNUAL_PRICE_ID
+    value: "price_1TN7sF1F8wnoWYvwd0QaLZNA"
+  - name: STRIPE_OPERATOR_MONTHLY_PRICE_ID
+    value: "price_1TN7jS1F8wnoWYvwM5GqfxDw"
+  - name: STRIPE_OPERATOR_ANNUAL_PRICE_ID
+    value: "price_1TN7jo1F8wnoWYvw6Xu1zAtC"
   - name: SUBSCRIPTION_LAUNCH_DATE
     value: "2025-08-21"
+  - name: BUCKET_PRIVATE_CLOUD_SYNC
+    value: "omi-dev-private-cloud-sync"
+  - name: SERVICE_ACCOUNT_JSON
+    valueFrom:
+      secretKeyRef:
+        name: dev-omi-backend-secrets
+        key: SERVICE_ACCOUNT_JSON
+  - name: GOOGLE_CLOUD_PROJECT
+    value: "based-hardware-dev"
+  - name: GCP_LOCATION
+    value: "us-central1"
+  - name: TWILIO_AUTH_TOKEN
+    valueFrom:
+      secretKeyRef:
+        name: dev-omi-backend-secrets
+        key: TWILIO_AUTH_TOKEN
+  - name: TWILIO_API_KEY_SECRET
+    valueFrom:
+      secretKeyRef:
+        name: dev-omi-backend-secrets
+        key: TWILIO_API_KEY_SECRET
+  - name: VAD_GATE_MODE
+    value: "active"
+  # Fair-use system (PR #5748)
+  - name: FAIR_USE_ENABLED
+    value: "true"
+  - name: FAIR_USE_KILL_SWITCH
+    value: "false"
+  - name: FAIR_USE_DAILY_SPEECH_MS
+    value: "7200000"
+  - name: FAIR_USE_3DAY_SPEECH_MS
+    value: "28800000"
+  - name: FAIR_USE_WEEKLY_SPEECH_MS
+    value: "36000000"
+  - name: FAIR_USE_BUCKET_SECONDS
+    value: "60"
+  - name: FAIR_USE_REDIS_RETENTION_SECONDS
+    value: "691200"
+  - name: FAIR_USE_CLASSIFIER_ABUSE_SCORE_THRESHOLD
+    value: "0.7"
+  - name: FAIR_USE_CLASSIFIER_COOLDOWN_SECONDS
+    value: "43200"
+  - name: FAIR_USE_CLASSIFIER_MODEL
+    value: "gpt-5.1"
+  - name: FAIR_USE_CLASSIFIER_LOOKBACK_DAYS
+    value: "7"
+  - name: FAIR_USE_CHECK_INTERVAL_SECONDS
+    value: "300"
+  - name: FAIR_USE_EXEMPT_UIDS
+    value: ""
+  - name: FAIR_USE_RESTRICT_DAILY_DG_MS
+    value: "1800000"
+  - name: METRICS_SECRET
+    valueFrom:
+      secretKeyRef:
+        name: dev-omi-backend-secrets
+        key: METRICS_SECRET
+  - name: GROQ_API_KEY
+    valueFrom:
+      secretKeyRef:
+        name: dev-omi-backend-secrets
+        key: GROQ_API_KEY
+  - name: OPENROUTER_API_KEY
+    valueFrom:
+      secretKeyRef:
+        name: dev-omi-backend-secrets
+        key: OPENROUTER_API_KEY
+  - name: RAPID_API_KEY
+    valueFrom:
+      secretKeyRef:
+        name: dev-omi-backend-secrets
+        key: RAPID_API_KEY
+  - name: X_OAUTH_CLIENT_SECRET
+    valueFrom:
+      secretKeyRef:
+        name: dev-omi-backend-secrets
+        key: X_OAUTH_CLIENT_SECRET
+  - name: MCP_OAUTH_CHATGPT_CLIENT_SECRET
+    valueFrom:
+      secretKeyRef:
+        name: dev-omi-backend-secrets
+        key: MCP_OAUTH_CHATGPT_CLIENT_SECRET
 
 resources:
   # We usually recommend not to specify default resources and to leave this as a conscious
@@ -277,6 +424,10 @@ autoscaling:
       - type: Percent
         value: 25
         periodSeconds: 60
+      - type: Pods
+        value: 1
+        periodSeconds: 60
+      selectPolicy: Min
     scaleUp:
       stabilizationWindowSeconds: 0
       policies:
@@ -287,10 +438,26 @@ autoscaling:
         value: 4
         periodSeconds: 15
       selectPolicy: Max
-  # targetCPUUtilizationPercentage: 70
-  # targetMemoryUtilizationPercentage: 70
-  requestsPerPod: 60
-  failedResponseCode: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 70
+  # requestsPerPod: 60
+  # failedResponseCode: 10
+
+podDisruptionBudget:
+  minAvailable: "80%"
+  # maxUnavailable: "20%"
+
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxUnavailable: 1
+    maxSurge: 2
+
+terminationGracePeriodSeconds: 120
+lifecycle:
+  preStop:
+    exec:
+      command: ["sh", "-c", "sleep 15"]
 
 # Additional volumes on the output Deployment definition.
 volumes: []

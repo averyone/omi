@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+
 import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/widgets/photo_viewer_page.dart';
 
@@ -23,10 +24,7 @@ class PhotosGridComponent extends StatelessWidget {
           onTap: () {
             Navigator.of(context).push(
               MaterialPageRoute(
-                builder: (context) => PhotoViewerPage(
-                  photos: photos,
-                  initialIndex: idx,
-                ),
+                builder: (context) => PhotoViewerPage(photos: photos, initialIndex: idx),
               ),
             );
           },
@@ -46,16 +44,12 @@ class PhotosGridComponent extends StatelessWidget {
                   ),
                   if (photo.discarded)
                     Container(
-                      color: Colors.black.withOpacity(0.5),
-                      child: const Icon(
-                        Icons.visibility_off_outlined,
-                        color: Colors.white70,
-                        size: 28,
-                      ),
+                      color: Colors.black.withValues(alpha: 0.5),
+                      child: const Icon(Icons.visibility_off_outlined, color: Colors.white70, size: 28),
                     ),
                   if (isProcessing)
                     Container(
-                      color: Colors.black.withOpacity(0.5),
+                      color: Colors.black.withValues(alpha: 0.5),
                       child: const Center(
                         child: SizedBox(
                           width: 20,

@@ -1,165 +1,158 @@
 import asyncio
+import inspect
+import io
+import json
 import os
-import random
-import time
-from typing import List
+import threading
+import urllib.parse
+import wave as _wave
 from enum import Enum
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, cast
 
+import numpy as np
 import websockets
 from deepgram import DeepgramClient, DeepgramClientOptions, LiveTranscriptionEvents
 from deepgram.clients.live.v1 import LiveOptions
 
-from utils.stt.soniox_util import *
+from config.stt_provider_policy import (
+    DEEPGRAM_SELF_HOSTED_PROVIDER,
+    MODULATE_PROVIDER,
+    PARAKEET_PROVIDER,
+    STTServingSurface,
+    default_models_for_surface,
+    modulate_supports_language,
+    normalized_stt_language,
+    parakeet_supports_language,
+    provider_is_enabled,
+    supports_live_multilingual_mode,
+)
+from utils.async_tasks import create_named_task
+from utils.executors import sync_executor, run_blocking
+from utils.http_client import get_stt_client, get_stt_semaphore
+from utils.stt.safe_socket import SafeDeepgramSocket  # noqa: F401 — re-exported for backward compat
+from utils.stt.socket import STTSocket
+from utils.stt.provider_resilience import EXPECTED_REJECTIONS, ProviderCircuitBreaker
+from utils.stt.speaker_embedding import (
+    SPEAKER_MATCH_THRESHOLD,
+    async_extract_embedding_from_bytes,
+    compare_embeddings,
+)
+from utils.observability.fallback import record_fallback
+from utils.other.backoff import calculate_backoff_with_jitter
+import logging
 
-headers = {"Authorization": f"Token {os.getenv('DEEPGRAM_API_KEY')}", "Content-Type": "audio/*"}
+logger = logging.getLogger(__name__)
 
 
 class STTService(str, Enum):
     deepgram = "deepgram"
-    soniox = "soniox"
-    speechmatics = "speechmatics"
+    modulate = "modulate"
+    parakeet = "parakeet"
 
     @staticmethod
-    def get_model_name(value):
+    def get_model_name(value: 'STTService') -> Optional[str]:
         if value == STTService.deepgram:
             return 'deepgram_streaming'
-        elif value == STTService.soniox:
-            return 'soniox_streaming'
-        elif value == STTService.speechmatics:
-            return 'speechmatics_streaming'
+        if value == STTService.modulate:
+            return 'modulate_streaming'
+        if value == STTService.parakeet:
+            return 'parakeet_streaming'
 
 
-# Languages supported by Soniox
-soniox_supported_languages = [
-    'multi',
-    'en',
-    'af',
-    'sq',
-    'ar',
-    'az',
-    'eu',
-    'be',
-    'bn',
-    'bs',
-    'bg',
-    'ca',
-    'zh',
-    'hr',
-    'cs',
-    'da',
-    'nl',
-    'et',
-    'fi',
-    'fr',
-    'gl',
-    'de',
-    'el',
-    'gu',
-    'he',
-    'hi',
-    'hu',
-    'id',
-    'it',
-    'ja',
-    'kn',
-    'kk',
-    'ko',
-    'lv',
-    'lt',
-    'mk',
-    'ms',
-    'ml',
-    'mr',
-    'no',
-    'fa',
-    'pl',
-    'pt',
-    'pa',
-    'ro',
-    'ru',
-    'sr',
-    'sk',
-    'sl',
-    'es',
-    'sw',
-    'sv',
-    'tl',
-    'ta',
-    'te',
-    'th',
-    'tr',
-    'uk',
-    'ur',
-    'vi',
-    'cy',
-]
-soniox_multi_languages = soniox_supported_languages
+class ParakeetConnectionError(RuntimeError):
+    def __init__(self, reason: str, detail: str = '') -> None:
+        self.reason = reason
+        super().__init__(detail or reason)
 
-# Languages supported by Deepgram, nova-2/nova-3 model
-deepgram_supported_languages = {
-    'multi',
-    'bg',
-    'ca',
-    'zh',
-    'zh-CN',
-    'zh-Hans',
-    'zh-TW',
-    'zh-Hant',
-    'zh-HK',
-    'cs',
-    'da',
-    'da-DK',
-    'nl',
-    'en',
-    'en-US',
-    'en-AU',
-    'en-GB',
-    'en-NZ',
-    'en-IN',
-    'et',
-    'fi',
-    'nl-BE',
-    'fr',
-    'fr-CA',
-    'de',
-    'de-CH',
-    'el' 'hi',
-    'hu',
-    'id',
-    'it',
-    'ja',
-    'ko',
-    'ko-KR',
-    'lv',
-    'lt',
-    'ms',
-    'no',
-    'pl',
-    'pt',
-    'pt-BR',
-    'pt-PT',
-    'ro',
-    'ru',
-    'sk',
-    'es',
-    'es-419',
-    'sv',
-    'sv-SE',
-    'th',
-    'th-TH',
-    'tr',
-    'uk',
-    'vi',
-}
-deepgram_nova2_multi_languages = ['multi', 'en', 'es']
-deepgram_nova3_multi_languages = [
+
+_parakeet_circuit = ProviderCircuitBreaker(
+    failure_threshold=int(os.getenv('PARAKEET_CIRCUIT_FAILURE_THRESHOLD', '3')),
+    cooldown_seconds=float(os.getenv('PARAKEET_CIRCUIT_COOLDOWN_SECONDS', '30')),
+)
+
+
+async def connect_stt_socket_with_fallback(
+    *,
+    primary_service: STTService,
+    connect_primary: Callable[[], Awaitable[Optional[STTSocket]]],
+    connect_modulate: Callable[[], Awaitable[Optional[STTSocket]]],
+) -> Tuple[STTSocket, STTService]:
+    """Connect Parakeet before audio starts, falling back once to Modulate.
+
+    The circuit is deliberately process-local and never owns capacity. The
+    Parakeet service rejects excess streams at its GPU boundary; this helper
+    only avoids repeated connection latency while that provider is unhealthy.
+    """
+    if primary_service != STTService.parakeet:
+        raise ValueError('connection fallback is defined only for a Parakeet primary')
+
+    reason = 'circuit_open'
+    if _parakeet_circuit.allow_request():
+        try:
+            socket = await connect_primary()
+            if socket is None:
+                raise ParakeetConnectionError('config_incomplete', 'Parakeet returned no socket')
+            _parakeet_circuit.record_success()
+            return socket, STTService.parakeet
+        except ParakeetConnectionError as error:
+            reason = error.reason
+            if reason in EXPECTED_REJECTIONS:
+                _parakeet_circuit.record_rejection(reason)
+            else:
+                _parakeet_circuit.record_failure()
+        except (asyncio.TimeoutError, TimeoutError):
+            reason = 'timeout'
+            _parakeet_circuit.record_failure()
+        except Exception:
+            reason = 'provider_5xx'
+            _parakeet_circuit.record_failure()
+
+    try:
+        fallback_socket = await connect_modulate()
+        if fallback_socket is None:
+            raise RuntimeError('Modulate returned no socket')
+    except Exception:
+        record_fallback(
+            component='stt_selection',
+            from_mode=STTService.parakeet.value,
+            to_mode=STTService.modulate.value,
+            reason=reason,
+            outcome='exhausted',
+        )
+        raise
+
+    record_fallback(
+        component='stt_selection',
+        from_mode=STTService.parakeet.value,
+        to_mode=STTService.modulate.value,
+        reason=reason,
+        outcome='recovered',
+    )
+    return fallback_socket, STTService.modulate
+
+
+async def drain_stt_socket(socket: STTSocket) -> None:
+    """Await a serving socket's tail drain, with a synchronous close fallback."""
+    drain_and_close = getattr(socket, 'drain_and_close', None)
+    if not callable(drain_and_close):
+        socket.finish()
+        return
+    drain_result = drain_and_close()
+    if inspect.isawaitable(drain_result):
+        await drain_result
+        return
+    logger.warning('STT provider lacks async tail drain')
+    socket.finish()
+
+
+deepgram_nova3_multi_languages = {
     "multi",
     "en",
     "en-US",
     "en-AU",
     "en-GB",
-    "en-NZ",
     "en-IN",
+    "en-NZ",
     "es",
     "es-419",
     "fr",
@@ -173,118 +166,307 @@ deepgram_nova3_multi_languages = [
     "ja",
     "it",
     "nl",
+}
+deepgram_nova3_languages = {
+    "ar",
+    "ar-AE",
+    "ar-SA",
+    "ar-QA",
+    "ar-KW",
+    "ar-SY",
+    "ar-LB",
+    "ar-PS",
+    "ar-JO",
+    "ar-EG",
+    "ar-SD",
+    "ar-TD",
+    "ar-MA",
+    "ar-DZ",
+    "ar-TN",
+    "ar-IQ",
+    "ar-IR",
+    "be",
+    "bg",
+    "bn",
+    "bs",
+    "ca",
+    "cs",
+    "da",
+    "da-DK",
+    "de",
+    "de-CH",
+    "el",
+    "en",
+    "en-US",
+    "en-AU",
+    "en-GB",
+    "en-IN",
+    "en-NZ",
+    "es",
+    "es-419",
+    "et",
+    "fa",
+    "fi",
+    "fr",
+    "fr-CA",
+    "he",
+    "hi",
+    "hr",
+    "hu",
+    "id",
+    "it",
+    "ja",
+    "kn",
+    "ko",
+    "ko-KR",
+    "lt",
+    "lv",
+    "mk",
+    "mr",
+    "ms",
+    "nl",
     "nl-BE",
-]
-
-# Supported values: soniox-stt-rt,dg-nova-3,dg-nova-2
-stt_service_models = os.getenv('STT_SERVICE_MODELS', 'dg-nova-3').split(',')
-
-
-def get_stt_service_for_language(language: str):
-    # Picking STT service and STT language by following the order
-    for m in stt_service_models:
-        # Soniox
-        if m == 'soniox-stt-rt':
-            if language in soniox_multi_languages:
-                return STTService.soniox, 'multi', 'stt-rt-preview'
-        # DeepGram Nova-3
-        elif m == 'dg-nova-3':
-            if language in deepgram_nova3_multi_languages:
-                return STTService.deepgram, 'multi', 'nova-3'
-        # DeepGram Nova-2
-        elif m == 'dg-nova-2':
-            if language in deepgram_nova2_multi_languages:
-                return STTService.deepgram, 'multi', 'nova-2-general'
-            if language in deepgram_supported_languages:
-                return STTService.deepgram, language, 'nova-2-general'
-
-    # Fallback to DeepGram Nova-2 en
-    return STTService.deepgram, 'en', 'nova-2-general'
-
-
-async def send_initial_file_path(file_path: str, transcript_socket_async_send):
-    print('send_initial_file_path')
-    start = time.time()
-    # Reading and sending in chunks
-    with open(file_path, "rb") as file:
-        while True:
-            chunk = file.read(320)
-            if not chunk:
-                break
-            # print('Uploading', len(chunk))
-            await transcript_socket_async_send(bytes(chunk))
-            await asyncio.sleep(0.0001)  # if it takes too long to transcribe
-
-    print('send_initial_file_path', time.time() - start)
+    "no",
+    "pl",
+    "pt",
+    "pt-BR",
+    "pt-PT",
+    "ro",
+    "ru",
+    "sk",
+    "sl",
+    "sr",
+    "sv",
+    "sv-SE",
+    "ta",
+    "te",
+    "th",
+    "th-TH",
+    "tl",
+    "tr",
+    "uk",
+    "ur",
+    "vi",
+    "zh",
+    "zh-CN",
+    "zh-Hans",
+    "zh-HK",
+    "zh-Hant",
+    "zh-TW",
+}
 
 
-async def send_initial_file(data: List[List[int]], transcript_socket):
-    print('send_initial_file2')
-    start = time.time()
-
-    # Reading and sending in chunks
-    for i in range(0, len(data)):
-        chunk = data[i]
-        # print('Uploading', chunk)
-        transcript_socket.send(bytes(chunk))
-        await asyncio.sleep(0.00005)  # if it takes too long to transcribe
-
-    print('send_initial_file', time.time() - start)
+# Compatibility export for callers. Its value is owned by stt_provider_policy.
+DEFAULT_STT_SERVICE_MODELS = default_models_for_surface(STTServingSurface.STREAMING)
+stt_service_models = os.getenv('STT_SERVICE_MODELS', ','.join(DEFAULT_STT_SERVICE_MODELS)).split(',')
 
 
-# Initialize Deepgram client based on environment configuration
+def _stt_selection_from_mode(_language: str, base_lang: str) -> str:
+    if base_lang and base_lang != 'en':
+        return 'requested_non_en'
+    if any(m.strip() for m in stt_service_models):
+        return 'configured'
+    return 'none'
+
+
+def _requested_stt_language(
+    language: Optional[str], base_lang: str, *, multi_lang_enabled: bool, surface: STTServingSurface
+) -> str:
+    """Resolve the provider language while retaining PTT's explicit input language.
+
+    Live sessions with multi-language enabled must select a provider's auto-detect
+    mode. PTT does not load the user's transcription preference, so it keeps its
+    explicit language unless the client itself sends the ``multi`` sentinel.
+    """
+    if base_lang == 'multi' or (
+        surface == STTServingSurface.STREAMING
+        and multi_lang_enabled
+        and language
+        and supports_live_multilingual_mode(language)
+    ):
+        return 'multi'
+    return base_lang
+
+
+def _models_with_preferred_service(
+    models: List[str] | Tuple[str, ...], *, preferred_service: Optional[str]
+) -> Tuple[str, ...]:
+    """Honor a recognized client engine preference within the serving policy."""
+    normalized_preference = (preferred_service or '').strip().lower()
+    if normalized_preference != STTService.parakeet.value:
+        return tuple(models)
+    return tuple(model for model in models if model.strip() == STTService.parakeet.value) + tuple(
+        model for model in models if model.strip() != STTService.parakeet.value
+    )
+
+
+def get_stt_service_for_language(
+    language: Optional[str],
+    multi_lang_enabled: bool = True,
+    *,
+    surface: STTServingSurface = STTServingSurface.STREAMING,
+    preferred_service: Optional[str] = None,
+) -> Tuple[Optional[STTService], Optional[str], Optional[str]]:
+    """Select a serving STT provider allowed for the requested product surface.
+
+    A ``dg-*`` configuration is eligible only for the retained self-hosted
+    deployment. It never selects Deepgram's hosted API, and a missing
+    self-hosted endpoint falls through to the policy-owned alternatives.
+    """
+    # Missing language metadata historically meant English. Preserve that
+    # behavior without opening a retired-provider fallback for unknown values.
+    base_lang = normalized_stt_language(language) or 'en'
+    requested_language = _requested_stt_language(
+        language,
+        base_lang,
+        multi_lang_enabled=multi_lang_enabled,
+        surface=surface,
+    )
+
+    def select(
+        models: List[str] | Tuple[str, ...],
+    ) -> Tuple[Optional[Tuple[STTService, str, str]], Optional[str]]:
+        parakeet_fallback_reason: Optional[str] = None
+        for model in _models_with_preferred_service(models, preferred_service=preferred_service):
+            model = model.strip()
+            if (
+                model.startswith('dg-')
+                and provider_is_enabled(DEEPGRAM_SELF_HOSTED_PROVIDER, surface)
+                and is_dg_self_hosted
+            ):
+                dg_model = model.replace('dg-', '', 1)
+                if multi_lang_enabled and language in deepgram_nova3_multi_languages:
+                    return (STTService.deepgram, 'multi', dg_model), parakeet_fallback_reason
+                if language in deepgram_nova3_languages:
+                    return (STTService.deepgram, language, dg_model), parakeet_fallback_reason
+                continue
+            if model == 'parakeet':
+                if provider_is_enabled(PARAKEET_PROVIDER, surface) and os.getenv('HOSTED_PARAKEET_API_URL'):
+                    if parakeet_supports_language(surface, requested_language):
+                        return (STTService.parakeet, requested_language, 'parakeet'), parakeet_fallback_reason
+                    else:
+                        parakeet_fallback_reason = 'capability_mismatch'
+                else:
+                    parakeet_fallback_reason = 'config_incomplete'
+            if (
+                model == 'modulate-velma-2'
+                and provider_is_enabled(MODULATE_PROVIDER, surface)
+                and modulate_supports_language(requested_language)
+            ):
+                return (STTService.modulate, requested_language, 'velma-2'), parakeet_fallback_reason
+        return None, parakeet_fallback_reason
+
+    prefers_parakeet = (preferred_service or '').strip().lower() == STTService.parakeet.value
+
+    def record_selected_fallback(
+        selected: Tuple[STTService, str, str], *, used_default: bool, parakeet_fallback_reason: Optional[str]
+    ) -> None:
+        if selected[0] != STTService.parakeet and (prefers_parakeet or parakeet_fallback_reason):
+            record_fallback(
+                component='stt_selection',
+                from_mode=STTService.parakeet.value,
+                to_mode=selected[0].value,
+                reason=parakeet_fallback_reason
+                or (
+                    'capability_mismatch'
+                    if not parakeet_supports_language(surface, requested_language)
+                    else 'config_incomplete'
+                ),
+                outcome='degraded',
+            )
+        elif used_default:
+            record_fallback(
+                component='stt_selection',
+                from_mode=_stt_selection_from_mode(language or '', base_lang),
+                to_mode=selected[0].value,
+                reason='config_incomplete',
+                outcome='degraded',
+            )
+
+    selected, parakeet_fallback_reason = select(stt_service_models)
+    if selected is not None:
+        record_selected_fallback(selected, used_default=False, parakeet_fallback_reason=parakeet_fallback_reason)
+        return selected
+
+    selected, parakeet_fallback_reason = select(default_models_for_surface(surface))
+    if selected is not None:
+        record_selected_fallback(selected, used_default=True, parakeet_fallback_reason=parakeet_fallback_reason)
+        return selected
+
+    record_fallback(
+        component='stt_selection',
+        from_mode=_stt_selection_from_mode(language or '', base_lang),
+        to_mode='unavailable',
+        reason='capability_mismatch',
+        outcome='exhausted',
+    )
+    return None, None, None
+
+
+def should_preserve_filler_words(language: str) -> bool:
+    """Return True if filler words should be preserved for the given Deepgram language.
+
+    English filler sounds ("um", "uh") are safe to strip. But in other languages
+    those sounds are real words — e.g. Portuguese "um" means "a/one" (#6575).
+    """
+    return not language.startswith('en')
+
+
+# Initialize a Deepgram client only for the retained self-hosted deployment.
+# Never construct the SDK's default client here: its default endpoint is the
+# retired hosted Deepgram API.
 is_dg_self_hosted = os.getenv('DEEPGRAM_SELF_HOSTED_ENABLED', '').lower() == 'true'
-deepgram_options = DeepgramClientOptions(options={"keepalive": "true", "termination_exception_connect": "true"})
+deepgram: Optional[DeepgramClient] = None
 
-deepgram_beta_options = DeepgramClientOptions(options={"keepalive": "true", "termination_exception_connect": "true"})
-deepgram_beta_options.url = "https://api.beta.deepgram.com"
+
+def _self_hosted_deepgram_options(endpoint: str) -> DeepgramClientOptions:
+    """Build options for a verified self-hosted endpoint, never the SDK default."""
+    options = DeepgramClientOptions(options={"termination_exception_connect": "true"})
+    options.url = endpoint
+    return options
+
+
+def _require_self_hosted_deepgram_endpoint(endpoint: str) -> str:
+    """Reject the retired hosted endpoint before constructing an SDK client."""
+    if not endpoint:
+        raise ValueError("DEEPGRAM_SELF_HOSTED_URL must be set when DEEPGRAM_SELF_HOSTED_ENABLED is true")
+    if urllib.parse.urlparse(endpoint).hostname == 'api.deepgram.com':
+        raise ValueError('DEEPGRAM_SELF_HOSTED_URL must not point to api.deepgram.com')
+    return endpoint
+
 
 if is_dg_self_hosted:
-    dg_self_hosted_url = os.getenv('DEEPGRAM_SELF_HOSTED_URL')
-    if not dg_self_hosted_url:
-        raise ValueError("DEEPGRAM_SELF_HOSTED_URL must be set when DEEPGRAM_SELF_HOSTED_ENABLED is true")
-    # Override only the URL while keeping all other options
-    deepgram_options.url = dg_self_hosted_url
-    deepgram_beta_options.url = dg_self_hosted_url
-    print(f"Using Deepgram self-hosted at: {dg_self_hosted_url}")
-
-deepgram = DeepgramClient(os.getenv('DEEPGRAM_API_KEY'), deepgram_options)
-
-# unused fn
-deepgram_beta = DeepgramClient(os.getenv('DEEPGRAM_API_KEY'), deepgram_beta_options)
+    dg_self_hosted_url = _require_self_hosted_deepgram_endpoint(os.getenv('DEEPGRAM_SELF_HOSTED_URL') or '')
+    deepgram_options = _self_hosted_deepgram_options(dg_self_hosted_url)
+    logger.info(f"Using Deepgram self-hosted at: {dg_self_hosted_url}")
+    deepgram = DeepgramClient(os.getenv('DEEPGRAM_API_KEY') or '', deepgram_options)
 
 
 async def process_audio_dg(
-    stream_transcript,
+    stream_transcript: Callable[[List[Dict[str, Any]]], None],
     language: str,
     sample_rate: int,
     channels: int,
-    preseconds: int = 0,
-    model: str = 'nova-2-general',
-):
-    print('process_audio_dg', language, sample_rate, channels, preseconds)
+    model: str = 'nova-3',
+    keywords: Optional[List[str]] = None,
+    is_active: Optional[Callable[[], bool]] = None,
+) -> Optional[SafeDeepgramSocket]:
+    logger.info(f'process_audio_dg {language} {sample_rate} {channels}')
 
-    def on_message(self, result, **kwargs):
-        # print(f"Received message from Deepgram")  # Log when message is received
+    def on_message(self: Any, result: Any, **kwargs: Any) -> None:
         sentence = result.channel.alternatives[0].transcript
-        # print(sentence)
         if len(sentence) == 0:
             return
-        # print(sentence)
-        segments = []
+        segments: List[Dict[str, Any]] = []
         for word in result.channel.alternatives[0].words:
-            is_user = True if word.speaker == 0 and preseconds > 0 else False
-            if word.start < preseconds:
-                # print('Skipping word', word.start)
-                continue
             if not segments:
                 segments.append(
                     {
                         'speaker': f"SPEAKER_{word.speaker}",
-                        'start': word.start - preseconds,
-                        'end': word.end - preseconds,
+                        'start': word.start,
+                        'end': word.end,
                         'text': word.punctuated_word,
-                        'is_user': is_user,
+                        'is_user': False,
                         'person_id': None,
                     }
                 )
@@ -300,69 +482,137 @@ async def process_audio_dg(
                             'start': word.start,
                             'end': word.end,
                             'text': word.punctuated_word,
-                            'is_user': is_user,
+                            'is_user': False,
                             'person_id': None,
                         }
                     )
 
-        # stream
         stream_transcript(segments)
 
-    def on_error(self, error, **kwargs):
-        print(f"Error: {error}")
+    def on_error(self: Any, error: Any, **kwargs: Any) -> None:
+        logger.error(f"Deepgram error: {error}")
 
-    print("Connecting to Deepgram")  # Log before connection attempt
-    return connect_to_deepgram_with_backoff(on_message, on_error, language, sample_rate, channels, model)
+    logger.info("Connecting to Deepgram")  # Log before connection attempt
+    dg_connection = await connect_to_deepgram_with_backoff(
+        on_message, on_error, language, sample_rate, channels, model, keywords or [], is_active=is_active
+    )
+
+    if dg_connection is None:
+        return None
+
+    # Always wrap with SafeDeepgramSocket for dead-connection detection (#5870)
+    safe_conn = SafeDeepgramSocket(dg_connection)
+
+    # Register close-reason handlers that feed into SafeDeepgramSocket
+    def on_dg_close(self: Any, close: Any, **kwargs: Any) -> None:
+        reason = f'DG close event: {close}'
+        logger.info('Deepgram connection closed: %s', close)
+        safe_conn.set_close_reason(reason)
+
+    def on_dg_error(self: Any, error: Any, **kwargs: Any) -> None:
+        reason = f'DG error event: {error}'
+        logger.warning('Deepgram error (close-reason capture): %s', error)
+        safe_conn.set_close_reason(reason)
+
+    dg_connection.on(LiveTranscriptionEvents.Close, on_dg_close)
+    dg_connection.on(LiveTranscriptionEvents.Error, on_dg_error)
+
+    return safe_conn
 
 
-# Calculate backoff with jitter
-def calculate_backoff_with_jitter(attempt, base_delay=1000, max_delay=32000):
-    jitter = random.random() * base_delay
-    backoff = min(((2**attempt) * base_delay) + jitter, max_delay)
-    return backoff
-
-
-def connect_to_deepgram_with_backoff(
-    on_message, on_error, language: str, sample_rate: int, channels: int, model: str, retries=3
-):
-    print("connect_to_deepgram_with_backoff")
+async def connect_to_deepgram_with_backoff(
+    on_message: Callable[..., Any],
+    on_error: Callable[..., Any],
+    language: str,
+    sample_rate: int,
+    channels: int,
+    model: str,
+    keywords: List[str] = [],
+    retries: int = 3,
+    is_active: Optional[Callable[[], bool]] = None,
+) -> Optional[Any]:
+    logger.info("connect_to_deepgram_with_backoff")
     for attempt in range(retries):
+        if is_active is not None and not is_active():
+            logger.warning("Session ended, aborting Deepgram retry")
+            return None
         try:
-            return connect_to_deepgram(on_message, on_error, language, sample_rate, channels, model)
+            result = await run_blocking(
+                sync_executor,
+                connect_to_deepgram,
+                on_message,
+                on_error,
+                language,
+                sample_rate,
+                channels,
+                model,
+                keywords,
+            )
+            if result is not None:
+                return result
+            # start() returned False — retry unless this is the last attempt
+            if attempt == retries - 1:
+                logger.error('Deepgram start() returned False on all %d attempts — giving up', retries)
+                return None
+            logger.warning('Deepgram start() returned False (attempt %d/%d), retrying...', attempt + 1, retries)
         except Exception as error:
-            print(f'An error occurred: {error}')
+            logger.error(f'An error occurred: {error}')
             if attempt == retries - 1:  # Last attempt
                 raise
         backoff_delay = calculate_backoff_with_jitter(attempt)
-        print(f"Waiting {backoff_delay:.0f}ms before next retry...")
-        time.sleep(backoff_delay / 1000)  # Convert ms to seconds for sleep
+        logger.warning(f"Waiting {backoff_delay:.0f}ms before next retry...")
+        await asyncio.sleep(backoff_delay / 1000)  # Convert ms to seconds for sleep
 
     raise Exception(f'Could not open socket: All retry attempts failed.')
 
 
-def connect_to_deepgram(on_message, on_error, language: str, sample_rate: int, channels: int, model: str):
+def _dg_keywords_set(options: LiveOptions, keywords: List[str]):
+    if options.model in ['nova-3']:
+        options.keyterm = keywords
+        return options
+
+    options.keywords = keywords
+    return options
+
+
+def _deepgram_client_for_request() -> DeepgramClient:
+    """Return the explicitly configured self-hosted Deepgram client only."""
+    if not is_dg_self_hosted or deepgram is None:
+        raise RuntimeError('Hosted Deepgram is disabled; self-hosted Deepgram is not configured')
+    return deepgram
+
+
+def connect_to_deepgram(
+    on_message: Callable[..., Any],
+    on_error: Callable[..., Any],
+    language: str,
+    sample_rate: int,
+    channels: int,
+    model: str,
+    keywords: List[str] = [],
+) -> Optional[Any]:
     try:
-        dg_connection = deepgram.listen.websocket.v("1")
+        dg_connection: Any = _deepgram_client_for_request().listen.websocket.v("1")
         dg_connection.on(LiveTranscriptionEvents.Transcript, on_message)
         dg_connection.on(LiveTranscriptionEvents.Error, on_error)
 
-        def on_open(self, open, **kwargs):
-            print("Connection Open")
+        def on_open(self: Any, open: Any, **kwargs: Any) -> None:
+            logger.info("Connection Open")
 
-        def on_metadata(self, metadata, **kwargs):
-            print(f"Metadata: {metadata}")
+        def on_metadata(self: Any, metadata: Any, **kwargs: Any) -> None:
+            logger.info(f"Metadata: {metadata}")
 
-        def on_speech_started(self, speech_started, **kwargs):
-            print("Speech Started")
+        def on_speech_started(self: Any, speech_started: Any, **kwargs: Any) -> None:
+            logger.info("Speech Started")
 
-        def on_utterance_end(self, utterance_end, **kwargs):
+        def on_utterance_end(self: Any, utterance_end: Any, **kwargs: Any) -> None:
             pass
 
-        def on_close(self, close, **kwargs):
-            print("Connection Closed")
+        def on_close(self: Any, close: Any, **kwargs: Any) -> None:
+            logger.info("Connection Closed")
 
-        def on_unhandled(self, unhandled, **kwargs):
-            print(f"Unhandled Websocket Message: {unhandled}")
+        def on_unhandled(self: Any, unhandled: Any, **kwargs: Any) -> None:
+            logger.error(f"Unhandled Websocket Message: {unhandled}")
 
         dg_connection.on(LiveTranscriptionEvents.Open, on_open)
         dg_connection.on(LiveTranscriptionEvents.Metadata, on_metadata)
@@ -379,15 +629,25 @@ def connect_to_deepgram(on_message, on_error, language: str, sample_rate: int, c
             smart_format=True,
             profanity_filter=False,
             diarize=True,
-            filler_words=False,
+            filler_words=should_preserve_filler_words(language),
             channels=channels,
             multichannel=channels > 1,
             model=model,
             sample_rate=sample_rate,
             encoding='linear16',
         )
-        result = dg_connection.start(options)
-        print('Deepgram connection started:', result)
+        # `keywords` can be None (e.g. the multi-channel / phone-call path opens the
+        # socket without passing a vocabulary list). Guard against `len(None)`, which
+        # previously raised "object of type 'NoneType' has no len()" and aborted the
+        # socket open, leaving the client stuck in a reconnect loop.
+        if keywords:
+            options = _dg_keywords_set(options, keywords)
+
+        result: Any = dg_connection.start(options)
+        logger.info(f'Deepgram connection started: {result}')
+        if not result:
+            logger.error('Deepgram connection start() returned False — connection not established')
+            return None
         return dg_connection
     except websockets.exceptions.WebSocketException as e:
         raise Exception(f'Could not open socket: WebSocketException {e}')
@@ -395,292 +655,770 @@ def connect_to_deepgram(on_message, on_error, language: str, sample_rate: int, c
         raise Exception(f'Could not open socket: {e}')
 
 
-async def process_audio_soniox(
-    stream_transcript, sample_rate: int, language: str, uid: str, preseconds: int = 0, language_hints: List[str] = []
-):
-    # Soniox supports diarization primarily for English
-    api_key = os.getenv('SONIOX_API_KEY')
+# ---------------------------------------------------------------------------
+# Modulate (Velma-2) streaming
+# ---------------------------------------------------------------------------
+
+
+def _build_wav_header(sample_rate: int, bits_per_sample: int = 16, channels: int = 1) -> bytes:  # type: ignore[reportUnusedFunction]  # exported, exercised by tests/unit/test_modulate_stt.py
+    buf = io.BytesIO()
+    with _wave.open(buf, 'wb') as wf:
+        wf.setnchannels(channels)
+        wf.setsampwidth(bits_per_sample // 8)
+        wf.setframerate(sample_rate)
+        wf.writeframes(b'')
+    return buf.getvalue()
+
+
+class SafeModulateSocket(STTSocket):
+    def __init__(
+        self,
+        ws: Any,
+        stream_transcript: Callable[[List[Dict[str, Any]]], None],
+        loop: asyncio.AbstractEventLoop,
+        preseconds: int = 0,
+    ) -> None:
+        self._ws: Any = ws
+        self._stream_transcript: Callable[[List[Dict[str, Any]]], None] = stream_transcript
+        self._loop: asyncio.AbstractEventLoop = loop
+        self._preseconds = preseconds
+        self._dead = False
+        self._closed = False
+        self._death_reason: Optional[str] = None
+        self._lock = threading.Lock()
+        self._header_sent = False
+        self._wav_header: Optional[bytes] = None
+        self._send_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=2000)
+        self._done_event = asyncio.Event()
+        self._prev_partial_text: str = ''
+        self._prev_partial_start_ms: int = 0
+        self._prev_partial_word_count: int = 0
+        self._recv_task: asyncio.Task[None] = asyncio.ensure_future(self._recv_loop(), loop=loop)
+        self._send_task: asyncio.Task[None] = asyncio.ensure_future(self._send_loop(), loop=loop)
+
+    def set_wav_header(self, header: bytes) -> None:
+        self._wav_header = header
+
+    @property
+    def is_connection_dead(self) -> bool:
+        return self._dead
+
+    @property
+    def death_reason(self) -> Optional[str]:
+        return self._death_reason
+
+    def _mark_dead(self, reason: str) -> None:
+        with self._lock:
+            if not self._dead:
+                self._dead = True
+                self._death_reason = reason
+
+    def send(self, data: bytes) -> bool:
+        """Synchronously accept audio only when it reaches the provider queue.
+
+        The listen handler runs on ``self._loop``.  A producer on a different
+        event loop cannot safely wait for a queue callback without blocking that
+        loop, so it is treated as a terminal ownership error rather than
+        optimistically dropping audio.
+        """
+        with self._lock:
+            if self._dead or self._closed:
+                return False
+            prepend_header = not self._header_sent and self._wav_header is not None
+            queued_data = (self._wav_header or b'') + data if prepend_header else data
+
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+
+        if current_loop is not self._loop:
+            # This only occurs in synchronous tests / shutdown code where the
+            # provider loop is stopped, so no concurrent queue consumer exists.
+            # It remains a truthful immediate enqueue rather than a deferred
+            # cross-loop callback. A live foreign loop is a terminal misuse.
+            if current_loop is not None or self._loop.is_running():
+                self._mark_dead('send called outside provider event loop')
+                return False
+
+        try:
+            self._send_queue.put_nowait(queued_data)
+        except asyncio.QueueFull:
+            self._mark_dead('send queue full')
+            return False
+
+        if prepend_header:
+            with self._lock:
+                self._header_sent = True
+        return True
+
+    def finalize(self) -> None:
+        pass
+
+    def finish(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+        try:
+            self._loop.call_soon_threadsafe(lambda: self._send_queue.put_nowait(b''))
+        except (RuntimeError, Exception):
+            pass
+
+    async def drain_and_close(self) -> None:
+        try:
+            await asyncio.sleep(0)
+            _EOS_SENTINEL = b'__EOS__'
+            try:
+                self._send_queue.put_nowait(_EOS_SENTINEL)
+            except asyncio.QueueFull:
+                pass
+            try:
+                await asyncio.wait_for(self._send_task, timeout=10)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                pass
+            try:
+                await asyncio.wait_for(self._done_event.wait(), timeout=60)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                logger.warning('Modulate drain timed out waiting for done message')
+                if self._prev_partial_text:
+                    self._flush_partial()
+        except Exception:
+            pass
+        if self._prev_partial_text:
+            self._flush_partial()
+        self._recv_task.cancel()
+        try:
+            await self._ws.close()
+        except Exception:
+            pass
+
+    async def _send_loop(self) -> None:
+        _EOS_SENTINEL = b'__EOS__'
+        try:
+            while not self._closed and not self._dead:
+                data = await self._send_queue.get()
+                if data == b'':
+                    break
+                if data == _EOS_SENTINEL:
+                    # Docs: send empty text frame ("") to signal end of audio stream
+                    await self._ws.send('')
+                    break
+                await self._ws.send(data)
+        except websockets.exceptions.ConnectionClosed as e:
+            self._mark_dead(f'ws send closed: {e}')
+        except Exception as e:
+            self._mark_dead(f'ws send error: {e}')
+
+    async def _recv_loop(self) -> None:
+        try:
+            async for raw_msg in self._ws:
+                if self._closed:
+                    break
+                try:
+                    loaded: object = json.loads(raw_msg)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if not isinstance(loaded, dict):
+                    continue
+                msg: Dict[str, Any] = cast(Dict[str, Any], loaded)
+
+                msg_type = msg.get('type', '')
+                if msg_type == 'error':
+                    err = msg.get('error', msg.get('message', 'unknown error'))
+                    logger.error(f'Modulate streaming error: {err}')
+                    if self._prev_partial_text:
+                        self._flush_partial()
+                    self._done_event.set()
+                    self._mark_dead(f'modulate error: {err}')
+                    break
+                elif msg_type == 'done':
+                    logger.info('Modulate streaming done: duration_ms=%s', msg.get('duration_ms'))
+                    if self._prev_partial_text:
+                        self._flush_partial()
+                    self._done_event.set()
+                    break
+                elif msg_type == 'partial_utterance':
+                    pu = msg.get('partial_utterance', msg)
+                    self._handle_partial_utterance(pu)
+                elif msg_type == 'utterance':
+                    utt = msg.get('utterance', msg)
+                    self._handle_utterance(utt)
+        except websockets.exceptions.ConnectionClosed as e:
+            self._mark_dead(f'ws recv closed: {e}')
+        except Exception as e:
+            self._mark_dead(f'ws recv error: {e}')
+
+    def _handle_partial_utterance(self, msg: Dict[str, Any]) -> None:
+        # Modulate sends cumulative partial_utterance messages during streaming
+        # (e.g., "He", "He could", "He could hardly"...) but these are preview-only.
+        # We buffer them here and only forward the final `utterance` via _handle_utterance.
+        #
+        # Limitation: the user sees no live text until the utterance finalizes
+        # (after the speech segment completes). For continuous speech, this can be
+        # the entire clip duration. Modulate has no endpointing config to control this.
+        # Deepgram uses endpointing=300ms to deliver finalized chunks mid-stream.
+        #
+        # To add live preview from partials, implement delta extraction (Option C-lite):
+        # track committed words, emit only new stable words as incremental segments.
+        # This would require careful handling of Modulate's occasional mid-partial
+        # text revisions and start_ms shifts.
+        text = msg.get('text', '').strip()
+        if not text:
+            return
+        start_ms = msg.get('start_ms', 0)
+        self._prev_partial_text = text
+        self._prev_partial_start_ms = start_ms
+        self._prev_partial_word_count = len(text.split())
+
+    def _flush_partial(self) -> None:
+        text = self._prev_partial_text
+        start_ms = self._prev_partial_start_ms
+        self._prev_partial_text = ''
+        self._prev_partial_word_count = 0
+        if not text:
+            return
+        start = start_ms / 1000.0
+        if self._preseconds and start < self._preseconds:
+            return
+        segments = [
+            {
+                'speaker': 'SPEAKER_00',
+                'start': start,
+                'end': start,
+                'text': text,
+                'is_user': False,
+                'person_id': None,
+            }
+        ]
+        self._stream_transcript(segments)
+
+    def _handle_utterance(self, msg: Dict[str, Any]) -> None:
+        text = msg.get('text', '').strip()
+        if not text:
+            return
+
+        self._prev_partial_text = ''
+        self._prev_partial_word_count = 0
+
+        start_ms = msg.get('start_ms', 0)
+        duration_ms = msg.get('duration_ms', 0)
+        start = start_ms / 1000.0
+        end = (start_ms + duration_ms) / 1000.0
+
+        if self._preseconds and start < self._preseconds:
+            return
+
+        raw_speaker = msg.get('speaker')
+        if isinstance(raw_speaker, int) and raw_speaker >= 1:
+            speaker_idx = raw_speaker - 1
+        else:
+            speaker_idx = 0
+        speaker = f'SPEAKER_{speaker_idx:02d}'
+
+        segments = [
+            {
+                'speaker': speaker,
+                'start': start,
+                'end': end,
+                'text': text,
+                'is_user': False,
+                'person_id': None,
+            }
+        ]
+        self._stream_transcript(segments)
+
+
+async def process_audio_modulate(
+    stream_transcript: Callable[[List[Dict[str, Any]]], None],
+    sample_rate: int,
+    language: str,
+    preseconds: int = 0,
+) -> SafeModulateSocket:
+    api_key = os.getenv('MODULATE_API_KEY')
     if not api_key:
-        raise ValueError("SonioxAPI key is not set. Please set the SONIOX_API_KEY environment variable.")
+        raise ValueError('MODULATE_API_KEY environment variable is not set')
 
-    uri = 'wss://stt-rt.soniox.com/transcribe-websocket'
-
-    # Speaker identification only works with English and 16kHz sample rate
-    # New Soniox streaming is not supported speaker indentification
-    has_speech_profile = (
-        False  # create_user_speech_profile(uid) if uid and sample_rate == 16000 and language == 'en' else False
-    )
-
-    # Determine audio format based on sample rate
-    audio_format = "s16le" if sample_rate == 16000 else "mulaw"
-
-    # Construct the initial request with all required and optional parameters
-    request = {
+    params = {
         'api_key': api_key,
-        'model': 'stt-rt-preview',
-        'audio_format': audio_format,
-        'sample_rate': sample_rate,
-        'num_channels': 1,
-        'enable_speaker_tags': True,
-        'language_hints': language_hints,
+        'speaker_diarization': 'true',
+        'partial_results': 'true',
+        'sample_rate': str(sample_rate),
+        'audio_format': 's16le',
+        'num_channels': '1',
     }
+    if language and language != 'multi':
+        params['language'] = language
+    uri = f'wss://modulate-developer-apis.com/api/velma-2-stt-streaming?{urllib.parse.urlencode(params)}'
 
-    # Add speaker identification if available
-    if has_speech_profile:
-        request['enable_speaker_identification'] = True
-        request['cand_speaker_names'] = [uid]
+    logger.info(f'Connecting to Modulate Velma-2 streaming sample_rate={sample_rate} language={language}')
+    ws = await websockets.connect(uri, ping_timeout=10, ping_interval=10)
+    loop = asyncio.get_running_loop()
+    sock = SafeModulateSocket(ws, stream_transcript, loop, preseconds=preseconds)
+    logger.info('Modulate Velma-2 streaming connection established')
+    return sock
 
-    try:
-        # Connect to Soniox WebSocket
-        print("Connecting to Soniox WebSocket...")
-        soniox_socket = await websockets.connect(uri, ping_timeout=10, ping_interval=10)
-        print("Connected to Soniox WebSocket.")
 
-        # Send the initial request
-        await soniox_socket.send(json.dumps(request))
-        print(f"Sent initial request: {request}")
+# --- Parakeet (self-hosted, opt-in) ---------------------------------------------------------------
+PARAKEET_WINDOW_SECONDS = float(os.getenv('PARAKEET_WINDOW_SECONDS', '6.0'))
+PARAKEET_WS_CONNECT_TIMEOUT = float(os.getenv('PARAKEET_WS_CONNECT_TIMEOUT', '10.0'))
 
-        # Variables to track current segment
-        current_segment = None
-        current_segment_time = None
-        current_speaker_id = None
 
-        # Start listening for messages from Soniox
-        async def on_message():
-            nonlocal current_segment, current_segment_time, current_speaker_id
+def _pcm16_to_wav_bytes(pcm: bytes, sample_rate: int) -> bytes:
+    buf = io.BytesIO()
+    with _wave.open(buf, 'wb') as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)  # int16
+        w.setframerate(sample_rate)
+        w.writeframes(pcm)
+    return buf.getvalue()
+
+
+class ParakeetStreamingSocket(STTSocket):
+    """Streaming-shaped wrapper over the batch Parakeet /v1/transcribe service.
+
+    Implements the STTSocket interface the listen pipeline (and the VAD gate) expect: sync
+    send/finish/finalize plus the is_connection_dead/death_reason properties. The real tail
+    drain is async drain_and_close(), which the listen teardown awaits.
+    """
+
+    def __init__(
+        self,
+        stream_transcript: Callable[[List[Dict[str, Any]]], None],
+        api_url: str,
+        sample_rate: int,
+        window_seconds: float = PARAKEET_WINDOW_SECONDS,
+    ) -> None:
+        self._stream_transcript: Callable[[List[Dict[str, Any]]], None] = stream_transcript
+        self._url = api_url.rstrip('/') + '/v1/transcribe'
+        self._sample_rate = sample_rate
+        self._window_bytes = int(sample_rate * 2 * window_seconds)  # int16 mono
+        self._buf = bytearray()
+        self._lock = threading.Lock()
+        self._emitted_seconds = 0.0
+        self._closed = False
+        self._pump_task: Optional[asyncio.Task[None]] = None
+        # Surfaced to the listen loop via is_connection_dead so a crashed pump is detected
+        # and drained like a dead Deepgram socket (the receive loop polls is_connection_dead).
+        self._dead = False
+        self._dead_reason: Optional[str] = None
+
+        # Basic online diarization: Parakeet returns no speaker info, so we embed each segment's
+        # voice (via the same hosted embedding service the listen pipeline uses downstream) and
+        # cluster into session-stable SPEAKER_N labels. Opt-in: only when that service is wired up.
+        self._diarize = bool(os.getenv('HOSTED_SPEAKER_EMBEDDING_API_URL')) and (
+            os.getenv('PARAKEET_DIARIZATION', '1') == '1'
+        )
+        self._spk_centroids: List[np.ndarray[Any, Any]] = []  # running-mean embedding per discovered speaker
+        self._spk_counts: List[int] = []
+        self._last_speaker = 0  # reused for clips too short to embed / on transient embed failures
+
+    def start(self) -> None:
+        # Named + tracked so it's supervised/drained like the other WS-scoped tasks.
+        self._pump_task = create_named_task(self._pump(), name="parakeet_stt_pump")
+
+    # --- STTSocket interface the listen pipeline / VAD gate call (all sync) ---
+    def send(self, data: bytes) -> bool:
+        if self._closed or self._dead or getattr(self, '_finalized', False):
+            return False
+        if not data:
+            return True
+        with self._lock:
+            self._buf.extend(data)
+        return True
+
+    def finish(self) -> None:
+        # Sync close signal (ABC requirement; the VAD gate calls this). The pump observes
+        # _closed, force-flushes, and exits; the awaited tail drain happens in drain_and_close().
+        self._closed = True
+
+    def finalize(self) -> None:
+        # No persistent connection to finalize; the tail is drained by drain_and_close().
+        pass
+
+    @property
+    def is_connection_dead(self) -> bool:
+        # Transient POST errors are retried on the next window (stay alive). Only a crashed
+        # pump (no consumer for buffered audio) reports dead so the listen loop tears down.
+        return self._dead
+
+    @property
+    def death_reason(self) -> Optional[str]:
+        return self._dead_reason
+
+    # --- async tail drain awaited by the listen teardown ---
+    async def drain_and_close(self) -> None:
+        """Drain the final (sub-window) chunk INLINE before returning.
+
+        The listen teardown awaits this and then closes the client socket / cancels the
+        transcript-processing task, so the tail must be transcribed and delivered to
+        stream_transcript() *here*, not on the next pump tick (which would be dropped).
+        """
+        self._closed = True
+        pump, self._pump_task = self._pump_task, None
+        if pump is not None:
             try:
-                async for message in soniox_socket:
-                    response = json.loads(message)
-                    # print(response)
+                # The pump observes _closed, force-flushes whatever remains, then exits.
+                await pump
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("Parakeet pump await error during drain")
+        # Backstop: if the pump died early (and left audio buffered), drain it here so the
+        # tail is never silently lost. No-op when the pump already emptied the buffer.
+        await self._flush(force=True)
 
-                    # Update last message time
-                    current_time = time.time()
+    # --- internals ---
+    async def _pump(self) -> None:
+        try:
+            while True:
+                await asyncio.sleep(0.5)
+                closing = self._closed
+                await self._flush(force=closing)
+                if closing:
+                    break
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.exception("Parakeet pump loop error")
+            self._dead = True
+            self._dead_reason = f'parakeet pump crashed: {e}'
 
-                    # Check for error responses
-                    if 'error_code' in response:
-                        error_message = response.get('error_message', 'Unknown error')
-                        error_code = response.get('error_code', 0)
-                        print(f"Soniox error: {error_code} - {error_message}")
-                        raise Exception(f"Soniox error: {error_code} - {error_message}")
+    async def _flush(self, force: bool) -> None:
+        with self._lock:
+            avail = len(self._buf)
+            if not (avail >= self._window_bytes or (force and avail > 0)):
+                return
+            take = avail if force else self._window_bytes
+            chunk = bytes(self._buf[:take])
+            del self._buf[:take]
+            start = self._emitted_seconds
+            dur = (take // 2) / self._sample_rate
+            self._emitted_seconds += dur
 
-                    # Process response based on tokens field
-                    if 'tokens' in response:
-                        tokens = response.get('tokens', [])
+        segments = await self._transcribe_chunk(chunk, start, dur)
+        if segments:
+            self._stream_transcript(segments)
 
-                        if not tokens:
-                            if current_segment:
-                                stream_transcript([current_segment])
-                                current_segment = None
-                                current_segment_time = None
-                            continue
+    async def _assign_speaker(self, seg_pcm: bytes) -> int:
+        """Cluster a segment's voice embedding into a session-stable speaker index.
 
-                        # Extract speaker information and text from tokens
-                        new_speaker_id = None
-                        speaker_change_detected = False
-                        token_texts = []
+        Online greedy clustering: embed the clip, match it to the nearest known speaker
+        centroid (cosine < SPEAKER_MATCH_THRESHOLD) or start a new one. Falls back to the
+        previous speaker when diarization is off, the clip is too short to embed, or the
+        embedding service errs — so a transient failure never drops or mislabels the segment.
+        """
+        if not self._diarize:
+            return 0
+        # async_extract_embedding_from_bytes needs >= MIN_EMBEDDING_AUDIO_DURATION (0.5s); give a
+        # little margin. Shorter clips (back-channels, one-word turns) inherit the running speaker.
+        if len(seg_pcm) < int(self._sample_rate * 2 * 0.6):
+            return self._last_speaker
+        try:
+            wav = _pcm16_to_wav_bytes(seg_pcm, self._sample_rate)
+            emb = await async_extract_embedding_from_bytes(wav)
+        except Exception as e:
+            logger.warning(f"Parakeet diarization embed failed; reusing speaker {self._last_speaker}: {e}")
+            return self._last_speaker
 
-                        # First check if any token contains a speaker tag
-                        for token in tokens:
-                            token_text = token['text']
-                            if token_text.startswith('spk:'):
-                                new_speaker_id = token_text.split(':')[1] if ':' in token_text else "1"
-                                speaker_change_detected = (
-                                    current_speaker_id is not None and current_speaker_id != new_speaker_id
-                                )
-                                current_speaker_id = new_speaker_id
-                            else:
-                                token_texts.append(token_text)
+        best_i, best_dist = -1, 1e9
+        for i, centroid in enumerate(self._spk_centroids):
+            d = compare_embeddings(emb, centroid)
+            if d < best_dist:
+                best_i, best_dist = i, d
 
-                        # If no speaker tag found in this response, use the current speaker
-                        if new_speaker_id is None and current_speaker_id is not None:
-                            new_speaker_id = current_speaker_id
-                        elif new_speaker_id is None:
-                            new_speaker_id = "1"  # Default speaker
+        if best_i >= 0 and best_dist < SPEAKER_MATCH_THRESHOLD:
+            # Running-mean keeps the centroid stable as the speaker keeps talking.
+            n = self._spk_counts[best_i]
+            self._spk_centroids[best_i] = (self._spk_centroids[best_i] * n + emb) / (n + 1)
+            self._spk_counts[best_i] = n + 1
+            self._last_speaker = best_i
+            return best_i
 
-                        # If we have either a speaker change or threshold exceeded, send the current segment and start a new one
-                        punctuation_marks = ['.', '?', '!', ',', ';', ':', ' ']
-                        time_threshold_exceed = (
-                            current_segment_time
-                            and current_time - current_segment_time > 0.3
-                            and (current_segment and current_segment['text'][-1] in punctuation_marks)
-                        )
-                        if (speaker_change_detected or time_threshold_exceed) and current_segment:
-                            stream_transcript([current_segment])
-                            current_segment = None
-                            current_segment_time = None
+        self._spk_centroids.append(emb)
+        self._spk_counts.append(1)
+        self._last_speaker = len(self._spk_centroids) - 1
+        return self._last_speaker
 
-                        # Combine all non-speaker tokens into text
-                        content = ''.join(token_texts)
+    def _slice_pcm(self, pcm: bytes, rel_start: float, rel_end: float) -> bytes:
+        """Window-relative [rel_start, rel_end] seconds → PCM16 byte slice (clamped)."""
+        b0 = max(0, int(rel_start * self._sample_rate) * 2)
+        b1 = min(len(pcm), int(rel_end * self._sample_rate) * 2)
+        return pcm[b0:b1] if b1 > b0 else b''
 
-                        # Get timing information
-                        start_time = tokens[0]['start_ms'] / 1000.0
-                        end_time = tokens[-1]['end_ms'] / 1000.0
+    async def _transcribe_chunk(self, pcm: bytes, start: float, dur: float) -> List[Dict[str, Any]]:
+        wav = _pcm16_to_wav_bytes(pcm, self._sample_rate)
+        try:
+            client = get_stt_client()
+            async with get_stt_semaphore():
+                resp = await client.post(self._url, files={'file': ('audio.wav', wav, 'audio/wav')})
+            resp.raise_for_status()
+            loaded: object = resp.json()
+        except Exception as e:
+            logger.error(f"Parakeet transcribe failed: {e}")
+            return []
 
-                        if preseconds > 0 and start_time < preseconds:
-                            # print('Skipping word', start_time)
-                            continue
+        if not isinstance(loaded, dict):
+            return []
+        data: Dict[str, Any] = cast(Dict[str, Any], loaded)
 
-                        # Adjust timing if we have preseconds (for speech profile)
-                        if preseconds > 0:
-                            start_time -= preseconds
-                            end_time -= preseconds
-
-                        # Determine if this is the user based on speaker identification
-                        is_user = False
-                        if has_speech_profile and new_speaker_id == uid:
-                            is_user = True
-                        elif preseconds > 0 and new_speaker_id == "1":
-                            is_user = True
-
-                        # Create a new segment or append to existing one
-                        if current_segment is None:
-                            current_segment = {
-                                'speaker': f"SPEAKER_0{new_speaker_id}",
-                                'start': start_time,
-                                'end': end_time,
-                                'text': content,
-                                'is_user': is_user,
-                                'person_id': None,
-                            }
-                            current_segment_time = current_time
-                        else:
-                            current_segment['text'] += content
-                            current_segment['end'] = end_time
-
-                    else:
-                        print(f"Unexpected Soniox response format: {response}")
-            except websockets.exceptions.ConnectionClosedOK:
-                print("Soniox connection closed normally.")
-            except Exception as e:
-                print(f"Error receiving from Soniox: {e}")
-            finally:
-                if not soniox_socket.closed:
-                    await soniox_socket.close()
-                    print("Soniox WebSocket closed in on_message.")
-
-        # Start the coroutines
-        asyncio.create_task(on_message())
-        asyncio.create_task(soniox_socket.keepalive_ping())
-
-        # Return the Soniox WebSocket object
-        return soniox_socket
-
-    except Exception as e:
-        print(f"Exception in process_audio_soniox: {e}")
-        raise  # Re-raise the exception to be handled by the caller
+        out: List[Dict[str, Any]] = []
+        segments_raw: object = data.get('segments', [])
+        segments: List[object] = cast(List[object], segments_raw) if isinstance(segments_raw, list) else []
+        for s in segments:
+            if not isinstance(s, dict):
+                continue
+            seg: Dict[str, Any] = cast(Dict[str, Any], s)
+            text = (seg.get('text') or '').strip()
+            if not text:
+                continue
+            rel_start = float(seg.get('start', 0.0))
+            rel_end = float(seg.get('end', rel_start))
+            speaker = await self._assign_speaker(self._slice_pcm(pcm, rel_start, rel_end))
+            out.append(
+                {
+                    'speaker': f'SPEAKER_{speaker}',
+                    'start': start + rel_start,
+                    'end': start + rel_end,
+                    'text': text,
+                    'is_user': False,
+                    'person_id': None,
+                }
+            )
+        if not out and (data.get('text') or '').strip():
+            speaker = await self._assign_speaker(pcm)
+            out.append(
+                {
+                    'speaker': f'SPEAKER_{speaker}',
+                    'start': start,
+                    'end': start + dur,
+                    'text': str(data.get('text', '')).strip(),
+                    'is_user': False,
+                    'person_id': None,
+                }
+            )
+        return out
 
 
-async def process_audio_speechmatics(stream_transcript, sample_rate: int, language: str, preseconds: int = 0):
-    api_key = os.getenv('SPEECHMATICS_API_KEY')
-    uri = 'wss://eu2.rt.speechmatics.com/v2'
+class ParakeetWebSocketSocket(STTSocket):
+    """True streaming via Parakeet /v3/stream WebSocket with server-side VAD + diarization."""
 
-    request = {
-        "message": "StartRecognition",
-        "transcription_config": {
-            "language": language,
-            "diarization": "speaker",
-            "operating_point": "enhanced",
-            "max_delay_mode": "flexible",
-            "max_delay": 3,
-            "enable_partials": False,
-            "enable_entities": True,
-            "speaker_diarization_config": {"max_speakers": 4},
-        },
-        "audio_format": {"type": "raw", "encoding": "pcm_s16le", "sample_rate": sample_rate},
-        # "audio_events_config": {
-        #     "types": [
-        #         "laughter",
-        #         "music",
-        #         "applause"
-        #     ]
-        # }
-    }
-    try:
-        print("Connecting to Speechmatics WebSocket...")
-        socket = await websockets.connect(uri, extra_headers={"Authorization": f"Bearer {api_key}"})
-        print("Connected to Speechmatics WebSocket.")
+    def __init__(
+        self,
+        stream_transcript: Callable[[List[Dict[str, Any]]], None],
+        ws_url: str,
+        sample_rate: int,
+    ) -> None:
+        self._stream_transcript: Callable[[List[Dict[str, Any]]], None] = stream_transcript
+        self._ws_url = ws_url
+        self._sample_rate = sample_rate
+        self._send_queue: asyncio.Queue[Optional[bytes]] = asyncio.Queue(maxsize=1000)
+        self._closed = False
+        self._dead = False
+        self._dead_reason: Optional[str] = None
+        self._ws: Any = None
+        self._sender_task: Optional[asyncio.Task[None]] = None
+        self._receiver_task: Optional[asyncio.Task[None]] = None
+        self._connected_event = asyncio.Event()
+        self._startup_event = asyncio.Event()
+        self._startup_failure_reason = 'provider_5xx'
 
-        await socket.send(json.dumps(request))
-        print(f"Sent initial request: {request}")
+    async def start(self) -> None:
+        self._sender_task = create_named_task(self._run(), name="parakeet_ws_stream")
+        try:
+            await asyncio.wait_for(self._startup_event.wait(), timeout=PARAKEET_WS_CONNECT_TIMEOUT)
+        except asyncio.TimeoutError:
+            logger.error(f'Parakeet WS connect timeout after {PARAKEET_WS_CONNECT_TIMEOUT}s')
+            self._mark_dead(f'parakeet ws connect timeout after {PARAKEET_WS_CONNECT_TIMEOUT}s')
+            self._startup_failure_reason = 'timeout'
+            self._closed = True
+            self._cancel_task(self._sender_task)
+            raise ParakeetConnectionError('timeout', self._dead_reason or 'Parakeet connect timeout')
+        if not self._connected_event.is_set():
+            logger.error(f'Parakeet WS failed before connection: {self._dead_reason}')
+            raise ParakeetConnectionError(
+                self._startup_failure_reason,
+                self._dead_reason or 'parakeet ws failed before connection',
+            )
+        logger.info('Parakeet WS connected successfully')
 
-        async def on_message():
+    def send(self, data: bytes) -> bool:
+        if self._closed or self._dead:
+            return False
+        if not data:
+            return True
+        try:
+            self._send_queue.put_nowait(data)
+        except asyncio.QueueFull:
+            self._mark_dead('parakeet ws send queue full')
+            return False
+        return True
+
+    def finish(self) -> None:
+        self._finalized = True
+        self._queue_finalize_nowait()
+
+    def finalize(self) -> None:
+        self._finalized = True
+        self._queue_finalize_nowait()
+
+    @property
+    def is_connection_dead(self) -> bool:
+        return self._dead
+
+    @property
+    def death_reason(self) -> Optional[str]:
+        return self._dead_reason
+
+    async def drain_and_close(self) -> None:
+        if self._connected_event.is_set():
+            await self._send_queue.put(None)
+        self._closed = True
+        if self._sender_task and not self._sender_task.done():
             try:
-                async for message in socket:
-                    response = json.loads(message)
-                    if response['message'] == 'AudioAdded':
+                await asyncio.wait_for(self._sender_task, timeout=10)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                self._cancel_task(self._sender_task)
+        if self._receiver_task and not self._receiver_task.done():
+            try:
+                await asyncio.wait_for(self._receiver_task, timeout=10)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                self._cancel_task(self._receiver_task)
+
+    def _mark_dead(self, reason: str) -> None:
+        self._dead = True
+        self._dead_reason = reason
+
+    def _cancel_task(self, task: Optional[asyncio.Task[None]]) -> None:
+        if task and not task.done():
+            task.cancel()
+
+    def _queue_finalize_nowait(self) -> None:
+        if self._closed:
+            return
+        try:
+            self._send_queue.put_nowait(None)
+        except asyncio.QueueFull:
+            self._mark_dead('parakeet ws send queue full while finalizing')
+
+    async def _run(self) -> None:
+        url = f"{self._ws_url}?sample_rate={self._sample_rate}"
+
+        try:
+            async with websockets.connect(url, max_size=10 * 1024 * 1024) as ws:
+                self._ws = ws
+                ready_raw = await asyncio.wait_for(ws.recv(), timeout=PARAKEET_WS_CONNECT_TIMEOUT)
+                try:
+                    ready = json.loads(ready_raw) if isinstance(ready_raw, str) else None
+                except json.JSONDecodeError as error:
+                    raise RuntimeError('Parakeet returned an invalid readiness frame') from error
+                if not isinstance(ready, dict) or ready.get('type') != 'ready':
+                    raise RuntimeError('Parakeet did not confirm stream admission')
+                self._receiver_task = create_named_task(self._receive_loop(ws), name="parakeet_ws_recv")
+                self._connected_event.set()
+                self._startup_event.set()
+
+                while True:
+                    try:
+                        data = await asyncio.wait_for(self._send_queue.get(), timeout=0.1)
+                        if data is None:
+                            await ws.send("finalize")
+                            await asyncio.sleep(5)
+                            break
+                        await ws.send(data)
+                    except asyncio.TimeoutError:
+                        if self._closed:
+                            break
                         continue
-                    if response['message'] == 'AddTranscript':
-                        results = response['results']
-                        if not results:
-                            continue
-                        segments = []
-                        for r in results:
-                            # print(r)
-                            if not r['alternatives']:
-                                continue
+                    except Exception as e:
+                        logger.error(f"Parakeet WS send error: {e}")
+                        self._mark_dead(f"parakeet ws send: {e}")
+                        break
+                if self._closed and self._receiver_task and not self._receiver_task.done():
+                    try:
+                        await asyncio.wait_for(self._receiver_task, timeout=10)
+                    except (asyncio.TimeoutError, asyncio.CancelledError):
+                        self._cancel_task(self._receiver_task)
 
-                            r_data = r['alternatives'][0]
-                            r_type = r['type']  # word | punctuation
-                            r_start = r['start_time']
-                            r_end = r['end_time']
+        except Exception as e:
+            logger.error(f"Parakeet WS connection error: {e}")
+            close_reason = str(getattr(e, 'reason', '') or '')
+            if close_reason in EXPECTED_REJECTIONS:
+                self._startup_failure_reason = close_reason
+            elif isinstance(e, (asyncio.TimeoutError, TimeoutError)):
+                self._startup_failure_reason = 'timeout'
+            self._mark_dead(f"parakeet ws failed: {e}")
+        finally:
+            self._startup_event.set()
+            self._closed = True
+            if self._ws:
+                try:
+                    await self._ws.close()
+                except Exception:
+                    pass
 
-                            r_content = r_data['content']
-                            r_confidence = r_data['confidence']
-                            if r_confidence < 0.4:
-                                print('Low confidence:', r)
-                                continue
-                            r_speaker = r_data['speaker'][1:] if r_data['speaker'] != 'UU' else '1'
-                            speaker = f"SPEAKER_0{r_speaker}"
+    async def _receive_loop(self, ws: Any) -> None:
+        try:
+            async for msg in ws:
+                if isinstance(msg, str):
+                    try:
+                        loaded: object = json.loads(msg)
+                        if isinstance(loaded, dict):
+                            seg: Dict[str, Any] = cast(Dict[str, Any], loaded)
+                            if seg.get("text"):
+                                self._stream_transcript([seg])
+                    except json.JSONDecodeError:
+                        pass
+        except Exception as e:
+            if not self._closed:
+                logger.error(f"Parakeet WS recv error: {e}")
+                self._mark_dead(f"parakeet ws recv: {e}")
 
-                            is_user = True if r_speaker == '1' and preseconds > 0 else False
-                            if r_start < preseconds:
-                                # print('Skipping word', r_start, r_content)
-                                continue
-                            # print(r_content, r_speaker, [r_start, r_end])
-                            if not segments:
-                                segments.append(
-                                    {
-                                        'speaker': speaker,
-                                        'start': r_start,
-                                        'end': r_end,
-                                        'text': r_content,
-                                        'is_user': is_user,
-                                        'person_id': None,
-                                    }
-                                )
-                            else:
-                                last_segment = segments[-1]
-                                if last_segment['speaker'] == speaker:
-                                    last_segment['text'] += f' {r_content}'
-                                    last_segment['end'] += r_end
-                                else:
-                                    segments.append(
-                                        {
-                                            'speaker': speaker,
-                                            'start': r_start,
-                                            'end': r_end,
-                                            'text': r_content,
-                                            'is_user': is_user,
-                                            'person_id': None,
-                                        }
-                                    )
 
-                        if segments:
-                            stream_transcript(segments)
-                        # print('---')
-                    else:
-                        print(response)
-            except websockets.exceptions.ConnectionClosedOK:
-                print("Speechmatics connection closed normally.")
-            except Exception as e:
-                print(f"Error receiving from Speechmatics: {e}")
-            finally:
-                if not socket.closed:
-                    await socket.close()
-                    print("Speechmatics WebSocket closed in on_message.")
+async def process_audio_parakeet(
+    stream_transcript: Callable[[List[Dict[str, Any]]], None],
+    language: str,
+    sample_rate: int,
+    channels: int,
+    model: str = 'parakeet',
+    keywords: Optional[List[str]] = None,
+    is_active: Optional[Callable[[], bool]] = None,
+) -> Optional[ParakeetWebSocketSocket]:
+    """STT path backed by the self-hosted Parakeet /v3/stream WebSocket.
 
-        asyncio.create_task(on_message())
-        return socket
-    except Exception as e:
-        print(f"Exception in process_audio_speechmatics: {e}")
-        raise
+    Server-side VAD + diarization — the backend just relays PCM chunks
+    and receives speaker-labeled segments.
+    """
+    api_url = os.getenv('HOSTED_PARAKEET_API_URL')
+    if not api_url:
+        logger.error('process_audio_parakeet: HOSTED_PARAKEET_API_URL not set')
+        return None
+
+    ws_url = api_url.replace('http://', 'ws://').replace('https://', 'wss://').rstrip('/') + '/v3/stream'
+    logger.info(f'process_audio_parakeet {language} {sample_rate} -> {ws_url}')
+    socket = ParakeetWebSocketSocket(stream_transcript, ws_url, sample_rate)
+    await socket.start()
+    return socket
+
+
+def sort_segments_by_start(segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return sorted(segments, key=lambda s: s.get('start', 0))
+
+
+def make_stream_callback(
+    callback: Callable[[List[Dict[str, Any]]], None],
+    vad_gate: Any,
+    passthrough: bool,
+) -> Callable[[List[Dict[str, Any]]], None]:
+    if vad_gate is not None and not passthrough:
+
+        def wrapped(segments: List[Dict[str, Any]]) -> None:
+            vad_gate.remap_segments(segments)
+            callback(segments)
+
+        return wrapped
+    return callback
+
+
+def sort_transcript_segments_in_place(segments: List[Any]) -> None:
+    segments.sort(key=lambda s: s.start)

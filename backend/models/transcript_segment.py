@@ -1,10 +1,21 @@
 from datetime import timedelta
-from typing import Optional, List, Tuple
+from typing import Any, Optional, List, Tuple, cast
 import uuid
 import re
 from pydantic import BaseModel, Field
 
 from models.other import Person
+
+# Unicode sentence-ending punctuation used across supported locales.
+# Conservative set: English (.!?), CJK (。！？), Arabic/Urdu (؟۔), Hindi/Sanskrit (।॥)
+SENTENCE_ENDERS = frozenset('.?!。！？؟۔।॥')
+
+# Pre-compiled regex character class built from SENTENCE_ENDERS for use in re.split/re.findall.
+SENTENCE_ENDERS_CLASS = '[' + re.escape(''.join(SENTENCE_ENDERS)) + ']'
+SENTENCE_SPLIT_RE = re.compile(r'(?<=' + SENTENCE_ENDERS_CLASS + r')\s*')
+SENTENCE_FINDALL_RE = re.compile(
+    r'[^' + re.escape(''.join(SENTENCE_ENDERS)) + r']+(?:' + SENTENCE_ENDERS_CLASS + r'\s*|\s*$)'
+)
 
 
 class Translation(BaseModel):
@@ -21,22 +32,35 @@ class TranscriptSegment(BaseModel):
     person_id: Optional[str] = None
     start: float
     end: float
-    translations: Optional[List[Translation]] = []
+    translations: Optional[List[Translation]] = Field(default_factory=list)
     speech_profile_processed: bool = True
+    stt_provider: Optional[str] = None
 
-    def __init__(self, **data):
+    def __init__(self, **data: Any):
         super().__init__(**data)
         if not self.id:
             self.id = str(uuid.uuid4())
-        self.speaker_id = int(self.speaker.split('_')[1]) if self.speaker else 0
 
-    def get_timestamp_string(self):
+        if self.speaker:
+            try:
+                self.speaker_id = int(self.speaker.split('_', 1)[1])
+            except (ValueError, IndexError):
+                self.speaker_id = 0
+        else:
+            self.speaker_id = 0
+
+    def get_timestamp_string(self) -> str:
         start_duration = timedelta(seconds=int(self.start))
         end_duration = timedelta(seconds=int(self.end))
         return f'{str(start_duration).split(".")[0]} - {str(end_duration).split(".")[0]}'
 
     @staticmethod
-    def segments_as_string(segments, include_timestamps=False, user_name: str = None, people: List[Person] = None):
+    def segments_as_string(
+        segments: List['TranscriptSegment'],
+        include_timestamps: bool = False,
+        user_name: Optional[str] = None,
+        people: Optional[List[Person]] = None,
+    ) -> str:
         if not user_name:
             user_name = 'User'
         transcript = ''
@@ -56,7 +80,7 @@ class TranscriptSegment(BaseModel):
         return transcript.strip()
 
     @staticmethod
-    def can_display_seconds(segments):
+    def can_display_seconds(segments: List['TranscriptSegment']) -> bool:
         for i in range(len(segments)):
             for j in range(i + 1, len(segments)):
                 if segments[i].start > segments[j].end or segments[i].end > segments[j].start:
@@ -64,79 +88,123 @@ class TranscriptSegment(BaseModel):
         return True
 
     @staticmethod
-    def combine_segments(segments: [], new_segments: List['TranscriptSegment'], delta_seconds: int = 0):
+    def combine_segments(
+        segments: List['TranscriptSegment'], new_segments: List['TranscriptSegment'], delta_seconds: int = 0
+    ) -> Tuple[List['TranscriptSegment'], List['TranscriptSegment'], List[str]]:
         if not new_segments or len(new_segments) == 0:
-            return segments, (len(segments), len(segments))
+            return segments, [], []
 
-        # By the first punctuation on text
-        def _split(text: str) -> []:
-            i = -1
-            for m in ['.', '!', '?']:
-                i = text.find(m)
-                break
-            if i == -1:
-                return [text]
+        def _extract_last_incomplete_sentence(text: str) -> Tuple[Optional[str], str]:
+            text = text.strip()
+            if not text:
+                return None, ""
+            parts = [p for p in SENTENCE_SPLIT_RE.split(text) if p]
+            if not parts:
+                return None, text
+            last = parts[-1]
+            if last[-1] not in SENTENCE_ENDERS:
+                prefix = " ".join(parts[:-1]).strip() if len(parts) > 1 else ""
+                return last, prefix
+            return None, text
 
-            parts = [text[: i + 1]]
-            remaining = text[i + 1 :].strip()
-            if remaining:
-                parts.append(remaining)
-            return parts
+        def _split_first_sentence(text: str) -> Tuple[str, str]:
+            text = text.strip()
+            if not text:
+                return "", ""
+            parts = [p for p in SENTENCE_SPLIT_RE.split(text) if p]
+            if not parts:
+                return "", ""
+            first = parts[0]
+            rest = " ".join(parts[1:]).strip()
+            return first, rest
 
-        # Refined new segments
-        refined_segments = []
-        for segment in new_segments:
-            if segment.text and segment.text[0].islower() and re.search('[.?!]', segment.text):
-                start = segment.start
-                c_rate = (segment.end - segment.start) / len(segment.text)
-                for text in _split(segment.text):
-                    if not text:
-                        continue
-                    s = segment.copy(deep=True)
-                    s.text = text
+        def _starts_with_lowercase_cased(text: str) -> bool:
+            for ch in text.strip():
+                if ch.isalpha():
+                    return ch.islower()
+            return False
 
-                    # Time alignment
-                    s.start = start
-                    s.end = start + c_rate * len(text)
-                    start = s.end
-                    refined_segments.append(s)
-            else:
-                refined_segments.append(segment)
+        def _is_sentence_complete(text: str) -> bool:
+            text = text.strip()
+            return bool(text) and text[-1] in SENTENCE_ENDERS and not _starts_with_lowercase_cased(text)
 
-        new_segments = refined_segments
+        def _can_backward_merge_first_sentence(first_sentence: str, rest: str, last_incomplete: str) -> bool:
+            if not rest:
+                return False
+            if not first_sentence:
+                return False
+            return len(first_sentence) < len(last_incomplete)
+
+        def _can_backward_merge_single_sentence(first_sentence: str, last_incomplete: str) -> bool:
+            if not first_sentence:
+                return False
+            if _is_sentence_complete(first_sentence):
+                return False
+            return len(first_sentence) < len(last_incomplete)
+
+        def _should_merge_same_speaker(a: 'TranscriptSegment', b: 'TranscriptSegment') -> bool:
+            return (
+                (a.speaker == b.speaker or (a.is_user and b.is_user))
+                and a.speech_profile_processed == b.speech_profile_processed
+                and (b.start - a.end < 3)
+                and (len(a.text) < 125 or a.text[-1] not in SENTENCE_ENDERS)
+            )
+
+        def _should_merge_lowercase_continuation(a: 'TranscriptSegment', b: 'TranscriptSegment') -> bool:
+            return (
+                bool(a.text)
+                and bool(b.text)
+                and (a.speaker == b.speaker or (a.is_user and b.is_user))
+                and a.text[-1] not in SENTENCE_ENDERS
+                and _starts_with_lowercase_cased(b.text)
+                and a.speech_profile_processed == b.speech_profile_processed
+            )
 
         # Combined
-        def _merge(a, b: TranscriptSegment):
+        def _merge(
+            a: Optional['TranscriptSegment'], b: Optional['TranscriptSegment']
+        ) -> Tuple[Optional['TranscriptSegment'], Optional['TranscriptSegment']]:
             if not a or not b:
                 return a, b
-            if (
-                (a.speaker == b.speaker or (a.is_user and b.is_user))
-                and (b.start - a.end < 30)
-                and a.speech_profile_processed == b.speech_profile_processed
-            ):
+            if b.stt_provider != a.stt_provider:
+                return a, b
+
+            if a.speaker != b.speaker and not (a.is_user and b.is_user) and a.text and b.text:
+                last_incomplete, prefix = _extract_last_incomplete_sentence(a.text)
+                if last_incomplete:
+                    first_sentence, rest = _split_first_sentence(b.text)
+                    if _can_backward_merge_first_sentence(first_sentence, rest, last_incomplete):
+                        a.text = f'{a.text} {first_sentence}'.strip()
+                        b.text = rest
+                        return a, b
+                    if _can_backward_merge_single_sentence(first_sentence, last_incomplete):
+                        a.text = f'{a.text} {first_sentence}'.strip()
+                        return a, None
+                if last_incomplete and len(last_incomplete) < len(b.text.strip()):
+                    b.text = f'{last_incomplete} {b.text}'.strip()
+                    if prefix:
+                        a.text = prefix
+                        a.end = min(a.end, b.start)
+                        return a, b
+                    a.text = ""
+                    return None, b
+            if _should_merge_same_speaker(a, b):
                 a.text += f' {b.text}'
                 a.end = b.end
                 return a, None
 
-            if (
-                a.text
-                and b.text
-                and not a.text[-1] in [".", "?", "!"]
-                and b.text[0].islower()
-                and a.speech_profile_processed == b.speech_profile_processed
-            ):
+            if _should_merge_lowercase_continuation(a, b):
                 a.text += f' {b.text}'
                 a.end = b.end
                 return a, None
 
             return a, b
 
-        # Updates range [starts, ends)
-        starts = len(segments)
-        ends = 0
+        removed_ids: List[str] = []
 
         # Join
-        joined_similar_segments = [segments[-1].copy(deep=True)] if segments else []
+        joined_similar_segments: List[TranscriptSegment] = [segments[-1].model_copy(deep=True)] if segments else []
+        dropped_existing_tail = False
         for new_segment in new_segments:
             if delta_seconds > 0:
                 new_segment.start += delta_seconds
@@ -145,25 +213,28 @@ class TranscriptSegment(BaseModel):
             a, b = _merge(joined_similar_segments[-1] if joined_similar_segments else None, new_segment)
             if a:
                 joined_similar_segments[-1] = a
+            elif joined_similar_segments and joined_similar_segments[-1].text == "":
+                if segments and joined_similar_segments[-1].id == segments[-1].id:
+                    removed_ids.append(cast(str, segments[-1].id))
+                    dropped_existing_tail = True
+                joined_similar_segments.pop()
             if b:
                 joined_similar_segments.append(b)
 
-        if segments and segments[-1].id == joined_similar_segments[0].id:
-            # having updates
-            if segments[-1].text != joined_similar_segments[0].text:
-                starts = len(segments) - 1
+        if dropped_existing_tail and segments:
+            segments.pop(-1)
+        elif segments and joined_similar_segments and segments[-1].id == joined_similar_segments[0].id:
             segments.pop(-1)
 
         segments.extend(joined_similar_segments)
-        ends = len(segments)
 
-        # Speechmatics specific issue with punctuation
-        for i, segment in enumerate(segments):
-            segments[i].text = (
-                segments[i].text.strip().replace('  ', ' ').replace(' ,', ',').replace(' .', '.').replace(' ?', '?')
+        # Normalize punctuation spacing
+        for segment in segments:
+            segment.text = (
+                segment.text.strip().replace('  ', ' ').replace(' ,', ',').replace(' .', '.').replace(' ?', '?')
             )
 
-        return segments, (starts, ends)
+        return segments, joined_similar_segments, removed_ids
 
 
 class ImprovedTranscriptSegment(BaseModel):

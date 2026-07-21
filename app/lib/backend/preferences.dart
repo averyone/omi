@@ -1,14 +1,17 @@
 import 'dart:convert';
 
 import 'package:collection/collection.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
 import 'package:omi/backend/schema/app.dart';
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/backend/schema/conversation.dart';
+import 'package:omi/backend/schema/memory.dart';
 import 'package:omi/backend/schema/message.dart';
 import 'package:omi/backend/schema/person.dart';
-import 'package:omi/services/wals.dart';
-import 'package:omi/utils/platform/platform_service.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'package:omi/models/custom_stt_config.dart';
+import 'package:omi/models/stt_provider.dart';
+import 'package:omi/utils/logger.dart';
 
 class SharedPreferencesUtil {
   static final SharedPreferencesUtil _instance = SharedPreferencesUtil._internal();
@@ -20,39 +23,29 @@ class SharedPreferencesUtil {
 
   SharedPreferencesUtil._internal();
 
+  String get deviceIdHash => _preferences?.getString('deviceIdHash') ?? '';
+  set deviceIdHash(String value) => _preferences?.setString('deviceIdHash', value);
+
   static Future<void> init() async {
     _preferences = await SharedPreferences.getInstance();
   }
 
+  /// Picks up values written natively (the Dart cache doesn't see those otherwise).
+  static Future<void> reload() async {
+    await _preferences?.reload();
+  }
+
+  int get pendantPagesStored => getInt('pendantPagesStored');
+
+  bool get pendantDraining => getBool('pendantDraining');
+
+  bool get pendantStorageAlmostFull => getBool('pendantStorageAlmostFull');
+
   set uid(String value) => saveString('uid', value);
 
-  String get uid => getString('uid') ?? '';
+  String get uid => getString('uid');
 
   //-------------------------------- Device ----------------------------------//
-
-  bool? get hasOmiDevice => _preferences?.getBool('hasOmiDevice');
-
-  set hasOmiDevice(bool? value) {
-    if (value != null) {
-      _preferences?.setBool('hasOmiDevice', value);
-    } else {
-      _preferences?.remove('hasOmiDevice');
-    }
-  }
-
-  bool get hasPersonaCreated => getBool('hasPersonaCreated') ?? false;
-
-  set hasPersonaCreated(bool value) => saveBool('hasPersonaCreated', value);
-
-  String? get verifiedPersonaId => getString('verifiedPersonaId');
-
-  set verifiedPersonaId(String? value) {
-    if (value != null) {
-      _preferences?.setString('verifiedPersonaId', value);
-    } else {
-      _preferences?.remove('verifiedPersonaId');
-    }
-  }
 
   set btDevice(BtDevice value) {
     saveString('btDevice', jsonEncode(value.toJson()));
@@ -63,158 +56,387 @@ class SharedPreferencesUtil {
   }
 
   BtDevice get btDevice {
-    final String device = getString('btDevice') ?? '';
+    final String device = getString('btDevice');
     if (device.isEmpty) return BtDevice(id: '', name: '', type: DeviceType.omi, rssi: 0);
     return BtDevice.fromJson(jsonDecode(device));
   }
 
   set deviceName(String value) => saveString('deviceName', value);
 
-  String get deviceName => getString('deviceName') ?? '';
+  String get deviceName => getString('deviceName');
 
-  bool get deviceIsV2 => getBool('deviceIsV2') ?? false;
+  bool get deviceIsV2 => getBool('deviceIsV2');
 
   set deviceIsV2(bool value) => saveBool('deviceIsV2', value);
+
+  bool get deviceOnboardingCompleted => getBool('deviceOnboardingCompleted');
+
+  set deviceOnboardingCompleted(bool value) => saveBool('deviceOnboardingCompleted', value);
+
+  bool get backgroundModeEnabled => getBool('backgroundModeEnabled');
+
+  set backgroundModeEnabled(bool value) => saveBool('backgroundModeEnabled', value);
+
+  // Batch (offline) capture mode: when on, BLE audio is stored to local .bin files
+  // by the native layer instead of being transcribed in real time. Mutually
+  // exclusive with the realtime transcription socket (see CaptureProvider).
+  bool get batchModeEnabled => getBool('batchModeEnabled');
+
+  set batchModeEnabled(bool value) => saveBool('batchModeEnabled', value);
+
+  // Phone-mic batch capture marker. false = explicit Transcribe Later (files
+  // named audio_omibatchphone_...), true = automatic offline fallback (files
+  // named audio_omibatchphoneauto_...). Read natively as flutter.phoneBatchAuto.
+  bool get phoneBatchAuto => getBool('phoneBatchAuto');
+
+  set phoneBatchAuto(bool value) => saveBool('phoneBatchAuto', value);
+
+  // Transcribe Later: pause capture (native writer drops packets, keeps the file
+  // open) so the user can mute a sensitive moment and resume the same recording.
+  bool get batchMuted => getBool('batchMuted');
+
+  set batchMuted(bool value) => saveBool('batchMuted', value);
+
+  // Realtime device mute (double-tap pause). Persisted so the mute survives an
+  // app kill/restart — otherwise the device silently resumes recording on the
+  // next reconnect even though the user muted it. Restored into
+  // CaptureProvider._isPaused at startup and re-applied on reconnect.
+  bool get deviceMuted => getBool('deviceMuted');
+
+  set deviceMuted(bool value) => saveBool('deviceMuted', value);
+
+  // Transcribe Later: one-shot flag — when set, the native writer finalizes the
+  // current file and starts a fresh one (manual "New recording" cut), then clears it.
+  bool get batchCutRequested => getBool('batchCutRequested');
+
+  set batchCutRequested(bool value) => saveBool('batchCutRequested', value);
+
+  // Set while interactive device onboarding has temporarily suspended Transcribe Later so the
+  // realtime demo works. Persisted so an app-kill mid-onboarding is self-healed on next capture start.
+  bool get batchModeSuspendedForOnboarding => getBool('batchModeSuspendedForOnboarding');
+
+  set batchModeSuspendedForOnboarding(bool value) => saveBool('batchModeSuspendedForOnboarding', value);
+
+  // Double tap behavior: 0 = end conversation (default), 1 = pause/mute, 2 = star ongoing conversation
+  int get doubleTapAction => getInt('doubleTapAction');
+
+  set doubleTapAction(int value) => saveInt('doubleTapAction', value);
+
+  // Keep backward compatibility
+  bool get doubleTapPausesMuting => doubleTapAction == 1;
+
+  set doubleTapPausesMuting(bool value) => doubleTapAction = value ? 1 : 0;
+
+  // Custom STT configuration
+  CustomSttConfig get customSttConfig {
+    final configJson = getString('customSttConfig');
+    if (configJson.isEmpty) return CustomSttConfig.defaultConfig;
+    try {
+      return CustomSttConfig.fromJson(jsonDecode(configJson));
+    } catch (e, stack) {
+      Logger.debug('Error parsing customSttConfig: $e');
+      Logger.debug('Stack: $stack');
+      return CustomSttConfig.defaultConfig;
+    }
+  }
+
+  Future<bool> saveCustomSttConfig(CustomSttConfig value) async {
+    return await saveString('customSttConfig', jsonEncode(value.toJson()));
+  }
+
+  bool get useCustomStt => customSttConfig.isEnabled;
+
+  // Whether offline recordings auto-sync to Omi when the device connects.
+  // Defaults to true (auto-sync on) — the feature is opt-out from introduction.
+  bool get autoSyncOfflineRecordings => getBool('autoSyncOfflineRecordings', defaultValue: true);
+
+  set autoSyncOfflineRecordings(bool value) => saveBool('autoSyncOfflineRecordings', value);
+
+  // Per-provider config storage
+  CustomSttConfig? getConfigForProvider(SttProvider provider) {
+    final json = getString('sttConfig_${provider.name}');
+    if (json.isEmpty) return null;
+    try {
+      return CustomSttConfig.fromJson(jsonDecode(json));
+    } catch (e) {
+      Logger.debug('Error loading config for ${provider.name}: $e');
+      return null;
+    }
+  }
+
+  Future<bool> saveConfigForProvider(SttProvider provider, CustomSttConfig config) {
+    return saveString('sttConfig_${provider.name}', jsonEncode(config.toJson()));
+  }
 
   //----------------------------- Permissions ---------------------------------//
 
   set notificationsEnabled(bool value) => saveBool('notificationsEnabled', value);
 
-  bool get notificationsEnabled => getBool('notificationsEnabled') ?? false;
+  bool get notificationsEnabled => getBool('notificationsEnabled');
 
   set locationEnabled(bool value) => saveBool('locationEnabled', value);
 
-  bool get locationEnabled => getBool('locationEnabled') ?? false;
+  bool get locationEnabled => getBool('locationEnabled');
 
   //---------------------- Developer Settings ---------------------------------//
 
-  String get webhookOnConversationCreated => getString('webhookOnConversationCreated') ?? '';
+  String get webhookOnConversationCreated => getString('webhookOnConversationCreated');
 
   set webhookOnConversationCreated(String value) => saveString('webhookOnConversationCreated', value);
 
-  String get webhookOnTranscriptReceived => getString('webhookOnTranscriptReceived') ?? '';
+  String get webhookOnTranscriptReceived => getString('webhookOnTranscriptReceived');
 
   set webhookOnTranscriptReceived(String value) => saveString('webhookOnTranscriptReceived', value);
 
-  String get webhookAudioBytes => getString('webhookAudioBytes') ?? '';
+  String get webhookAudioBytes => getString('webhookAudioBytes');
 
   set webhookAudioBytes(String value) => saveString('webhookAudioBytes', value);
 
-  String get webhookAudioBytesDelay => getString('webhookAudioBytesDelay') ?? '';
+  String get webhookAudioBytesDelay => getString('webhookAudioBytesDelay');
 
   set webhookDaySummary(String value) => saveString('webhookDaySummary', value);
 
-  String get webhookDaySummary => getString('webhookDaySummary') ?? '';
+  String get webhookDaySummary => getString('webhookDaySummary');
 
   set webhookAudioBytesDelay(String value) => saveString('webhookAudioBytesDelay', value);
 
   set devModeJoanFollowUpEnabled(bool value) => saveBool('devModeJoanFollowUpEnabled', value);
 
-  bool get devModeJoanFollowUpEnabled => getBool('devModeJoanFollowUpEnabled') ?? false;
+  bool get devModeJoanFollowUpEnabled => getBool('devModeJoanFollowUpEnabled');
 
   set transcriptionDiagnosticEnabled(bool value) => saveBool('transcriptionDiagnosticEnabled', value);
 
-  bool get transcriptionDiagnosticEnabled => getBool('transcriptionDiagnosticEnabled') ?? false;
+  bool get transcriptionDiagnosticEnabled => getBool('transcriptionDiagnosticEnabled');
 
   set autoCreateSpeakersEnabled(bool value) => saveBool('autoCreateSpeakersEnabled', value);
 
-  bool get autoCreateSpeakersEnabled => getBool('autoCreateSpeakersEnabled') ?? true;
+  bool get autoCreateSpeakersEnabled => getBool('autoCreateSpeakersEnabled', defaultValue: true);
+
+  // Goal tracker widget on homepage - default is true (experimental feature)
+  set showGoalTrackerEnabled(bool value) => saveBool('showGoalTrackerEnabled', value);
+
+  bool get showGoalTrackerEnabled => getBool('showGoalTrackerEnabled', defaultValue: true);
+
+  // Daily score widget on homepage - default is true
+  set showDailyScoreEnabled(bool value) => saveBool('showDailyScoreEnabled', value);
+
+  bool get showDailyScoreEnabled => getBool('showDailyScoreEnabled', defaultValue: true);
+
+  // Tasks widget on homepage - default is true
+  set showTasksEnabled(bool value) => saveBool('showTasksEnabled', value);
+
+  bool get showTasksEnabled => getBool('showTasksEnabled', defaultValue: true);
+
+  // Phone call floating button on home screen - default is true
+  set showPhoneCallButton(bool value) => saveBool('showPhoneCallButton', value);
+
+  bool get showPhoneCallButton => getBool('showPhoneCallButton', defaultValue: true);
+
+  // Voice response playback mode for hardware-button replies.
+  //   0 = off (never speak)
+  //   1 = headphones only — AirPods / wired / USB / AirPlay (default)
+  //   2 = always, including the phone speaker
+  // Default is 1 so Omi never blasts a private answer out of the speaker
+  // in public unless the user explicitly opts in.
+  set voiceResponseMode(int value) => saveInt('voiceResponseMode', value);
+
+  int get voiceResponseMode => getInt('voiceResponseMode', defaultValue: 1);
+
+  // VAD Gate — server-side voice activity gating to save Deepgram costs (experimental)
+  set vadGateEnabled(bool value) => saveBool('vadGateEnabled', value);
+
+  bool get vadGateEnabled => getBool('vadGateEnabled');
+
+  // Claude Agent — route chat through desktop agent VM (experimental)
+  set claudeAgentEnabled(bool value) => saveBool('claudeAgentEnabled', value);
+
+  bool get claudeAgentEnabled => getBool('claudeAgentEnabled');
+
+  // Notification frequency (0-5): 0 = off, 5 = most frequent. Default is 0 (disabled)
+  set notificationFrequency(int value) => saveInt('notificationFrequency', value);
+
+  int get notificationFrequency => getInt('notificationFrequency', defaultValue: 0);
+
+  // Task category order for drag-and-drop sorting persistence
+  // Format: { "today": ["id1", "id2"], "tomorrow": ["id3"] }
+  set taskCategoryOrder(Map<String, List<String>> value) {
+    final encoded = jsonEncode(value);
+    saveString('taskCategoryOrder', encoded);
+  }
+
+  Map<String, List<String>> get taskCategoryOrder {
+    final encoded = getString('taskCategoryOrder');
+    if (encoded.isEmpty) return {};
+    try {
+      final decoded = jsonDecode(encoded) as Map<String, dynamic>;
+      return decoded.map((key, value) => MapEntry(key, (value as List).cast<String>()));
+    } catch (e) {
+      return {};
+    }
+  }
+
+  // Task -> goal mapping (local UI state)
+  // Format: { "taskId": "goalId" }
+  set taskGoalLinks(Map<String, String> value) {
+    final encoded = jsonEncode(value);
+    saveString('taskGoalLinks', encoded);
+  }
+
+  Map<String, String> get taskGoalLinks {
+    final encoded = getString('taskGoalLinks');
+    if (encoded.isEmpty) return {};
+    try {
+      final decoded = jsonDecode(encoded) as Map<String, dynamic>;
+      return decoded.map((key, value) => MapEntry(key, value.toString()));
+    } catch (e) {
+      return {};
+    }
+  }
+
+  // Wrapped 2025 - track if user has viewed their wrapped
+  set hasViewedWrapped2025(bool value) => saveBool('hasViewedWrapped2025', value);
+
+  bool get hasViewedWrapped2025 => getBool('hasViewedWrapped2025', defaultValue: false);
 
   set conversationEventsToggled(bool value) => saveBool('conversationEventsToggled', value);
 
-  bool get conversationEventsToggled => getBool('conversationEventsToggled') ?? false;
+  bool get conversationEventsToggled => getBool('conversationEventsToggled');
 
   set transcriptsToggled(bool value) => saveBool('transcriptsToggled', value);
 
-  bool get transcriptsToggled => getBool('transcriptsToggled') ?? false;
+  bool get transcriptsToggled => getBool('transcriptsToggled');
 
   set audioBytesToggled(bool value) => saveBool('audioBytesToggled', value);
 
-  bool get audioBytesToggled => getBool('audioBytesToggled') ?? false;
+  bool get audioBytesToggled => getBool('audioBytesToggled');
 
   set daySummaryToggled(bool value) => saveBool('daySummaryToggled', value);
 
-  bool get daySummaryToggled => getBool('daySummaryToggled') ?? false;
+  bool get daySummaryToggled => getBool('daySummaryToggled');
 
-  bool get showSummarizeConfirmation => getBool('showSummarizeConfirmation') ?? true;
+  bool get showSummarizeConfirmation => getBool('showSummarizeConfirmation', defaultValue: true);
 
   set showSummarizeConfirmation(bool value) => saveBool('showSummarizeConfirmation', value);
 
-  bool get showSubmitAppConfirmation => getBool('showSubmitAppConfirmation') ?? true;
+  bool get showSubmitAppConfirmation => getBool('showSubmitAppConfirmation', defaultValue: true);
 
   set showSubmitAppConfirmation(bool value) => saveBool('showSubmitAppConfirmation', value);
 
-  bool get showInstallAppConfirmation => getBool('showInstallAppConfirmation') ?? true;
+  bool get showInstallAppConfirmation => getBool('showInstallAppConfirmation', defaultValue: true);
 
   set showInstallAppConfirmation(bool value) => saveBool('showInstallAppConfirmation', value);
 
-  bool get showFirmwareUpdateDialog => getBool('v2/showFirmwareUpdateDialog') ?? true;
+  bool get showFirmwareUpdateDialog => getBool('v2/showFirmwareUpdateDialog', defaultValue: true);
 
   set showFirmwareUpdateDialog(bool value) => saveBool('v2/showFirmwareUpdateDialog', value);
 
-  int get conversationSilenceDuration => getInt('conversationSilenceDuration') ?? 120;
+  String get otaWifiSsid => getString('otaWifiSsid', defaultValue: '');
+  set otaWifiSsid(String value) => saveString('otaWifiSsid', value);
+
+  String get otaWifiPassword => getString('otaWifiPassword', defaultValue: '');
+  set otaWifiPassword(String value) => saveString('otaWifiPassword', value);
+
+  int get conversationSilenceDuration => getInt('conversationSilenceDuration', defaultValue: 120);
 
   set conversationSilenceDuration(int value) => saveInt('conversationSilenceDuration', value);
 
-  String get transcriptionModel => getString('transcriptionModel3') ?? 'soniox';
+  String get transcriptionModel => getString('transcriptionModel3', defaultValue: 'soniox');
 
   set transcriptionModel(String value) => saveString('transcriptionModel3', value);
 
-  bool get onboardingCompleted => getBool('onboardingCompleted') ?? false;
+  bool get onboardingCompleted => getBool('onboardingCompleted');
 
   set onboardingCompleted(bool value) => saveBool('onboardingCompleted', value);
 
-  String gptCompletionCache(String key) => getString('gptCompletionCache:$key') ?? '';
+  bool get permissionsCompleted => getBool('permissionsCompleted');
+
+  set permissionsCompleted(bool value) => saveBool('permissionsCompleted', value);
+
+  bool get aiConsentGiven => getBool('aiConsentGiven');
+
+  set aiConsentGiven(bool value) => saveBool('aiConsentGiven', value);
+
+  String gptCompletionCache(String key) => getString('gptCompletionCache:$key');
 
   setGptCompletionCache(String key, String value) => saveString('gptCompletionCache:$key', value);
 
-  bool get optInAnalytics => getBool('optInAnalytics') ?? (PlatformService.isDesktop ? false : true);
+  bool get optInAnalytics => getBool('optInAnalytics');
 
   set optInAnalytics(bool value) => saveBool('optInAnalytics', value);
 
-  bool get optInEmotionalFeedback => getBool('optInEmotionalFeedback') ?? false;
+  bool get optInEmotionalFeedback => getBool('optInEmotionalFeedback');
 
   set optInEmotionalFeedback(bool value) => saveBool('optInEmotionalFeedback', value);
 
-  bool get devModeEnabled => getBool('devModeEnabled') ?? false;
+  bool get devModeEnabled => getBool('devModeEnabled');
 
   set devModeEnabled(bool value) => saveBool('devModeEnabled', value);
 
+  // Auto-recording feature (macOS only)
+  bool get autoRecordingEnabled => getBool('autoRecordingEnabled', defaultValue: true);
+
+  set autoRecordingEnabled(bool value) => saveBool('autoRecordingEnabled', value);
+
   // Developer Diagnostics
-  bool get devLogsToFileEnabled => getBool('devLogsToFileEnabled') ?? false;
+  bool get devLogsToFileEnabled => getBool('devLogsToFileEnabled');
 
   set devLogsToFileEnabled(bool value) => saveBool('devLogsToFileEnabled', value);
 
-  bool get permissionStoreRecordingsEnabled => getBool('permissionStoreRecordingsEnabled') ?? false;
+  bool get permissionStoreRecordingsEnabled => getBool('permissionStoreRecordingsEnabled');
 
   set permissionStoreRecordingsEnabled(bool value) => saveBool('permissionStoreRecordingsEnabled', value);
 
-  bool get unlimitedLocalStorageEnabled => getBool('unlimitedLocalStorageEnabled') ?? false;
+  bool get unlimitedLocalStorageEnabled => getBool('unlimitedLocalStorageEnabled');
 
   set unlimitedLocalStorageEnabled(bool value) => saveBool('unlimitedLocalStorageEnabled', value);
 
-  bool get hasSpeakerProfile => getBool('hasSpeakerProfile') ?? false;
+  // Whether connected device supports new multi-file storage sync (persisted so it works when disconnected)
+  bool get deviceSupportsMultiFileSync => getBool('deviceSupportsMultiFileSync');
+
+  set deviceSupportsMultiFileSync(bool value) => saveBool('deviceSupportsMultiFileSync', value);
+
+  bool get hasSpeakerProfile => getBool('hasSpeakerProfile');
 
   set hasSpeakerProfile(bool value) => saveBool('hasSpeakerProfile', value);
 
-  bool get showDiscardedMemories => getBool('showDiscardedMemories') ?? true;
+  bool get showDiscardedMemories => getBool('showDiscardedMemories', defaultValue: false);
 
   set showDiscardedMemories(bool value) => saveBool('showDiscardedMemories', value);
 
+  // Show short conversations - default is false (hidden)
+  bool get showShortConversations => getBool('showShortConversations', defaultValue: false);
+
+  set showShortConversations(bool value) => saveBool('showShortConversations', value);
+
+  // Short conversation threshold in seconds - default is 60 (1 minute)
+  // Options: 60 (1 min), 120 (2 min), 180 (3 min), 240 (4 min), 300 (5 min)
+  int get shortConversationThreshold => getInt('v2/shortConversationThreshold', defaultValue: 0);
+
+  set shortConversationThreshold(int value) => saveInt('v2/shortConversationThreshold', value);
+
+  // Transcription settings (cached for fast preload)
+  bool get cachedSingleLanguageMode => getBool('cachedSingleLanguageMode');
+
+  set cachedSingleLanguageMode(bool value) => saveBool('cachedSingleLanguageMode', value);
+
+  List<String> get cachedTranscriptionVocabulary => getStringList('cachedTranscriptionVocabulary');
+
+  set cachedTranscriptionVocabulary(List<String> value) => saveStringList('cachedTranscriptionVocabulary', value);
+
   // User primary language preferences
-  String get userPrimaryLanguage => getString('userPrimaryLanguage') ?? '';
+  String get userPrimaryLanguage => getString('userPrimaryLanguage');
 
   set userPrimaryLanguage(String value) => saveString('userPrimaryLanguage', value);
 
-  bool get hasSetPrimaryLanguage => getBool('hasSetPrimaryLanguage') ?? false;
+  bool get hasSetPrimaryLanguage => getBool('hasSetPrimaryLanguage');
 
   set hasSetPrimaryLanguage(bool value) => saveBool('hasSetPrimaryLanguage', value);
 
-  int get currentStorageBytes => getInt('currentStorageBytes') ?? 0;
+  int get currentStorageBytes => getInt('currentStorageBytes');
 
   set currentStorageBytes(int value) => saveInt('currentStorageBytes', value);
 
-  int get previousStorageBytes => getInt('previousStorageBytes') ?? 0;
+  int get previousStorageBytes => getInt('previousStorageBytes');
 
   set previousStorageBytes(int value) => saveInt('previousStorageBytes', value);
 
@@ -223,16 +445,27 @@ class SharedPreferencesUtil {
   int get enabledAppsIntegrationsCount =>
       appsList.where((element) => element.enabled && element.worksExternally()).length;
 
-  bool get showConversationDeleteConfirmation => getBool('showConversationDeleteConfirmation') ?? true;
+  bool get showConversationDeleteConfirmation {
+    if (!getBool('conversationDeleteCascadeMigrated')) {
+      saveBool('conversationDeleteCascadeMigrated', true);
+      saveBool('showConversationDeleteConfirmation', true);
+      return true;
+    }
+    return getBool('showConversationDeleteConfirmation', defaultValue: true);
+  }
 
   set showConversationDeleteConfirmation(bool value) => saveBool("showConversationDeleteConfirmation", value);
 
-  bool get showActionItemDeleteConfirmation => getBool('showActionItemDeleteConfirmation') ?? true;
+  bool get showActionItemDeleteConfirmation => getBool('showActionItemDeleteConfirmation', defaultValue: true);
 
   set showActionItemDeleteConfirmation(bool value) => saveBool('showActionItemDeleteConfirmation', value);
 
+  bool get showGetOmiCard => getBool('showGetOmiCard', defaultValue: true);
+
+  set showGetOmiCard(bool value) => saveBool('showGetOmiCard', value);
+
   List<App> get appsList {
-    final List<String> apps = getStringList('appsList') ?? [];
+    final apps = getStringList('appsList');
     return App.fromJsonList(apps.map((e) => jsonDecode(e)).toList());
   }
 
@@ -252,29 +485,35 @@ class SharedPreferencesUtil {
 
   disableApp(String value) {
     final List<App> apps = appsList;
-    final app = apps.firstWhere((element) => element.id == value);
-    app.enabled = false;
-    appsList = apps;
+    App? app = apps.firstWhereOrNull((element) => element.id == value);
+    if (app != null) {
+      app.enabled = false;
+      appsList = apps;
+    }
   }
 
-  String get selectedChatAppId => getString('selectedChatAppId2') ?? 'no_selected';
+  String get selectedChatAppId => getString('selectedChatAppId2', defaultValue: 'no_selected');
 
   set selectedChatAppId(String value) => saveString('selectedChatAppId2', value);
 
-  String get lastUsedSummarizationAppId => getString('lastUsedSummarizationAppId') ?? '';
+  String get lastUsedSummarizationAppId => getString('lastUsedSummarizationAppId');
 
   set lastUsedSummarizationAppId(String value) => saveString('lastUsedSummarizationAppId', value);
 
+  String get preferredSummarizationAppId => getString('preferredSummarizationAppId');
+
+  set preferredSummarizationAppId(String value) => saveString('preferredSummarizationAppId', value);
+
   List<ServerConversation> get cachedConversations {
-    if (getBool('migratedMemories') ?? false) {
-      if (getStringList('cachedMemories') != null || getStringList('cachedMemories')!.isNotEmpty) {
-        final List<ServerConversation> cachedMemories =
-            getStringList('cachedMemories')!.map((e) => ServerConversation.fromJson(jsonDecode(e))).toList();
-        cachedConversations = cachedMemories;
+    if (getBool('migratedMemories')) {
+      final cachedMemories = getStringList('cachedMemories');
+      if (cachedMemories.isNotEmpty) {
+        final conversations = cachedMemories.map((e) => ServerConversation.fromJson(jsonDecode(e))).toList();
+        cachedConversations = conversations;
         saveBool('migratedMemories', true);
       }
     }
-    final List<String> conversations = getStringList('cachedConversations') ?? [];
+    final conversations = getStringList('cachedConversations');
     return conversations.map((e) => ServerConversation.fromJson(jsonDecode(e))).toList();
   }
 
@@ -284,7 +523,7 @@ class SharedPreferencesUtil {
   }
 
   List<ServerMessage> get cachedMessages {
-    final List<String> messages = getStringList('cachedMessages') ?? [];
+    final messages = getStringList('cachedMessages');
     return messages.map((e) => ServerMessage.fromJson(jsonDecode(e))).toList();
   }
 
@@ -293,8 +532,48 @@ class SharedPreferencesUtil {
     saveStringList('cachedMessages', messages);
   }
 
+  // Pending memories - memories created offline that need to be synced
+  List<Memory> get pendingMemories {
+    final ownerUid = uid;
+    if (ownerUid.isEmpty) return [];
+    _scopeLegacyUserData(ownerUid);
+    final memories = getStringList(_userScopedKey('pendingMemories', ownerUid));
+    return memories.map((e) => Memory.fromJson(jsonDecode(e))).where((memory) => memory.uid == ownerUid).toList();
+  }
+
+  set pendingMemories(List<Memory> value) {
+    final ownerUid = uid;
+    if (ownerUid.isEmpty) return;
+    final List<String> memories = value.map((e) => jsonEncode(e.toJson())).toList();
+    saveStringList(_userScopedKey('pendingMemories', ownerUid), memories);
+  }
+
+  void addPendingMemory(Memory memory) {
+    final List<Memory> memories = pendingMemories;
+    memories.add(memory);
+    pendingMemories = memories;
+  }
+
+  void removePendingMemory(String memoryId, {String? ownerUid}) {
+    final owner = ownerUid ?? uid;
+    if (owner.isEmpty) return;
+    final encoded = getStringList(_userScopedKey('pendingMemories', owner));
+    final memories = encoded.map((e) => Memory.fromJson(jsonDecode(e))).toList();
+    memories.removeWhere((m) => m.id == memoryId);
+    saveStringList(
+      _userScopedKey('pendingMemories', owner),
+      memories.map((memory) => jsonEncode(memory.toJson())).toList(),
+    );
+  }
+
+  void clearPendingMemories() {
+    final ownerUid = uid;
+    if (ownerUid.isEmpty) return;
+    saveStringList(_userScopedKey('pendingMemories', ownerUid), []);
+  }
+
   List<Person> get cachedPeople {
-    final List<String> people = getStringList('cachedPeople') ?? [];
+    final people = getStringList('cachedPeople');
     return people.map((e) => Person.fromJson(jsonDecode(e))).toList();
   }
 
@@ -333,7 +612,7 @@ class SharedPreferencesUtil {
   }
 
   ServerConversation? get modifiedConversationDetails {
-    final String conversation = getString('modifiedConversationDetails') ?? '';
+    final String conversation = getString('modifiedConversationDetails');
     if (conversation.isEmpty) return null;
     return ServerConversation.fromJson(jsonDecode(conversation));
   }
@@ -344,111 +623,180 @@ class SharedPreferencesUtil {
 
   set calendarPermissionAlreadyRequested(bool value) => saveBool('calendarPermissionAlreadyRequested', value);
 
-  bool get calendarPermissionAlreadyRequested => getBool('calendarPermissionAlreadyRequested') ?? false;
+  bool get calendarPermissionAlreadyRequested => getBool('calendarPermissionAlreadyRequested');
 
   set calendarEnabled(bool value) => saveBool('calendarEnabled', value);
 
-  bool get calendarEnabled => getBool('calendarEnabled') ?? false;
-
-  set calendarId(String value) => saveString('calendarId', value);
-
-  String get calendarId => getString('calendarId') ?? '';
-
-  set calendarType(String value) => saveString('calendarType2', value); // auto, manual (only for now)
-
-  String get calendarType => getString('calendarType2') ?? 'manual';
+  bool get calendarEnabled => getBool('calendarEnabled');
 
   //--------------------------------- Auth ------------------------------------//
 
-  String get authToken => getString('authToken') ?? '';
+  String get authToken => getString('authToken');
 
   set authToken(String value) => saveString('authToken', value);
 
-  int get tokenExpirationTime => getInt('tokenExpirationTime') ?? 0;
+  int get tokenExpirationTime => getInt('tokenExpirationTime');
 
   set tokenExpirationTime(int value) => saveInt('tokenExpirationTime', value);
 
-  String get email => getString('email') ?? '';
+  String get email => getString('email');
 
   set email(String value) => saveString('email', value);
 
-  String get givenName => getString('givenName') ?? '';
+  String get givenName => getString('givenName');
 
   set givenName(String value) => saveString('givenName', value);
 
-  String get familyName => getString('familyName') ?? '';
+  String get familyName => getString('familyName');
 
   set familyName(String value) => saveString('familyName', value);
 
   String get fullName => '$givenName $familyName'.trim();
 
-  set locationPermissionRequested(bool value) => saveBool('locationPermissionRequested', value);
-
-  bool get locationPermissionRequested => getBool('locationPermissionRequested') ?? false;
-
-  //--------------------------------- Wals ------------------------------------//
-  // WAL persistence has been moved to WalFileManager for better performance
-  // These methods are kept for migration purposes only
-
-  @deprecated
-  set wals(List<Wal> wals) {
-    final List<String> value = wals.map((e) => jsonEncode(e.toJson())).toList();
-    saveStringList('wals', value);
+  /// Clears persisted user identity and server-backed display caches while
+  /// preserving device, onboarding, permissions, and offline recording state.
+  void clearUserDisplayCache() {
+    final ownerUid = uid;
+    if (ownerUid.isNotEmpty) _scopeLegacyUserData(ownerUid);
+    authToken = '';
+    tokenExpirationTime = 0;
+    uid = '';
+    email = '';
+    givenName = '';
+    familyName = '';
+    cachedConversations = <ServerConversation>[];
+    cachedMessages = <ServerMessage>[];
+    cachedPeople = <Person>[];
+    appsList = <App>[];
+    modifiedConversationDetails = null;
+    cachedSingleLanguageMode = false;
+    cachedTranscriptionVocabulary = <String>[];
+    userPrimaryLanguage = '';
+    hasSetPrimaryLanguage = false;
+    hasSpeakerProfile = false;
+    selectedChatAppId = 'no_selected';
+    lastUsedSummarizationAppId = '';
+    preferredSummarizationAppId = '';
+    calendarEnabled = false;
+    _preferences?.remove('cachedMemories');
   }
 
-  @deprecated
-  List<Wal> get wals {
-    final List<String> value = getStringList('wals') ?? [];
-    return Wal.fromJsonList(value.map((e) => jsonDecode(e)).toList());
+  String _userScopedKey(String baseKey, String ownerUid) => '$baseKey:$ownerUid';
+
+  void scopeLegacyUserDataForCurrentUser() {
+    final ownerUid = uid;
+    if (ownerUid.isNotEmpty) _scopeLegacyUserData(ownerUid);
+  }
+
+  void _scopeLegacyUserData(String ownerUid) {
+    final preferences = _preferences;
+    if (preferences == null || ownerUid.isEmpty) return;
+
+    final pendingKey = _userScopedKey('pendingMemories', ownerUid);
+    final legacyPending = preferences.getStringList('pendingMemories');
+    if (legacyPending != null) {
+      final scopedPending = preferences.getStringList(pendingKey) ?? const <String>[];
+      preferences.setStringList(pendingKey, {...scopedPending, ...legacyPending}.toList());
+    }
+    preferences.remove('pendingMemories');
+
+    final goalsKey = _userScopedKey('goals_tracker_local_goals', ownerUid);
+    final legacyGoals = preferences.getString('goals_tracker_local_goals');
+    if (legacyGoals != null) {
+      final scopedGoals = preferences.getString(goalsKey);
+      preferences.setString(goalsKey, _mergeJsonLists(scopedGoals, legacyGoals));
+    }
+    preferences.remove('goals_tracker_local_goals');
+  }
+
+  String _mergeJsonLists(String? existing, String legacy) {
+    try {
+      final existingItems = existing == null ? <dynamic>[] : jsonDecode(existing) as List<dynamic>;
+      final legacyItems = jsonDecode(legacy) as List<dynamic>;
+      final merged = <String, dynamic>{};
+      for (final item in [...existingItems, ...legacyItems]) {
+        merged[jsonEncode(item)] = item;
+      }
+      return jsonEncode(merged.values.toList());
+    } catch (_) {
+      return existing ?? legacy;
+    }
+  }
+
+  String get foundOmiSource => getString('foundOmiSource');
+
+  set foundOmiSource(String value) => saveString('foundOmiSource', value);
+
+  set locationPermissionRequested(bool value) => saveBool('locationPermissionRequested', value);
+
+  bool get locationPermissionRequested => getBool('locationPermissionRequested');
+
+  set companionAssociationPrompted(bool value) => saveBool('companionAssociationPrompted', value);
+
+  bool get companionAssociationPrompted => getBool('companionAssociationPrompted');
+
+  //------------------------ TestFlight API Environment ----------------------//
+
+  /// Legacy display preference only. TestFlight routing is always the beta ring.
+  String get testFlightApiEnvironment => getString('testFlightApiEnvironment', defaultValue: 'staging');
+
+  set testFlightApiEnvironment(String value) => saveString('testFlightApiEnvironment', value);
+
+  bool get testFlightUseStagingApi => testFlightApiEnvironment == 'staging';
+
+  //--------------------------- Announcements ---------------------------------//
+
+  // Last known app version - used to detect app upgrades
+  // Empty string means fresh install
+  String get lastKnownAppVersion => getString('lastKnownAppVersion');
+
+  set lastKnownAppVersion(String value) => saveString('lastKnownAppVersion', value);
+
+  // Last known firmware version - used to detect firmware upgrades
+  String get lastKnownFirmwareVersion => getString('lastKnownFirmwareVersion');
+
+  set lastKnownFirmwareVersion(String value) => saveString('lastKnownFirmwareVersion', value);
+
+  // Last time general announcements were checked
+  DateTime? get lastAnnouncementCheckTime {
+    final str = getString('lastAnnouncementCheckTime');
+    if (str.isEmpty) return null;
+    return DateTime.tryParse(str);
+  }
+
+  set lastAnnouncementCheckTime(DateTime? value) {
+    if (value == null) {
+      remove('lastAnnouncementCheckTime');
+    } else {
+      saveString('lastAnnouncementCheckTime', value.toUtc().toIso8601String());
+    }
   }
 
   //--------------------------- Setters & Getters -----------------------------//
 
-  Future<bool> saveString(String key, String value) async {
-    return await _preferences?.setString(key, value) ?? false;
-  }
+  String getString(String key, {String defaultValue = ''}) => _preferences?.getString(key) ?? defaultValue;
 
-  String? getString(String key) {
-    return _preferences?.getString(key);
-  }
+  int getInt(String key, {int defaultValue = 0}) => _preferences?.getInt(key) ?? defaultValue;
 
-  Future<bool> saveInt(String key, int value) async {
-    return await _preferences?.setInt(key, value) ?? false;
-  }
+  bool getBool(String key, {bool defaultValue = false}) => _preferences?.getBool(key) ?? defaultValue;
 
-  int? getInt(String key) {
-    return _preferences?.getInt(key);
-  }
+  double getDouble(String key, {double defaultValue = 0.0}) => _preferences?.getDouble(key) ?? defaultValue;
 
-  Future<bool> saveBool(String key, bool value) async {
-    return await _preferences?.setBool(key, value) ?? false;
-  }
+  List<String> getStringList(String key, {List<String> defaultValue = const []}) =>
+      _preferences?.getStringList(key) ?? defaultValue;
 
-  bool? getBool(String key) {
-    return _preferences?.getBool(key);
-  }
+  Future<bool> saveString(String key, String value) async => await _preferences?.setString(key, value) ?? false;
 
-  Future<bool> saveDouble(String key, double value) async {
-    return await _preferences?.setDouble(key, value) ?? false;
-  }
+  Future<bool> saveInt(String key, int value) async => await _preferences?.setInt(key, value) ?? false;
 
-  double? getDouble(String key) {
-    return _preferences?.getDouble(key);
-  }
+  Future<bool> saveBool(String key, bool value) async => await _preferences?.setBool(key, value) ?? false;
 
-  Future<bool> saveStringList(String key, List<String> value) async {
-    return await _preferences?.setStringList(key, value) ?? false;
-  }
+  Future<bool> saveDouble(String key, double value) async => await _preferences?.setDouble(key, value) ?? false;
 
-  List<String>? getStringList(String key) {
-    return _preferences?.getStringList(key);
-  }
+  Future<bool> saveStringList(String key, List<String> value) async =>
+      await _preferences?.setStringList(key, value) ?? false;
 
-  Future<bool> remove(String key) async {
-    return await _preferences?.remove(key) ?? false;
-  }
+  Future<bool> remove(String key) async => await _preferences?.remove(key) ?? false;
 
-  Future<bool> clear() async {
-    return await _preferences?.clear() ?? false;
-  }
+  Future<bool> clear() async => await _preferences?.clear() ?? false;
 }

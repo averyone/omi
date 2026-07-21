@@ -1,28 +1,23 @@
 import 'package:flutter/material.dart';
+
 import 'package:firebase_crashlytics/firebase_crashlytics.dart';
 import 'package:intercom_flutter/intercom_flutter.dart';
 import 'package:talker_flutter/talker_flutter.dart';
+
 import 'package:omi/utils/debug_log_manager.dart';
+import 'package:omi/utils/l10n_extensions.dart';
 
 class CrashlyticsTalkerObserver extends TalkerObserver {
   CrashlyticsTalkerObserver();
 
   @override
   void onError(err) {
-    FirebaseCrashlytics.instance.recordError(
-      err.error,
-      err.stackTrace,
-      reason: err.message,
-    );
+    FirebaseCrashlytics.instance.recordError(err.error, err.stackTrace, reason: err.message);
   }
 
   @override
   void onException(err) {
-    FirebaseCrashlytics.instance.recordError(
-      err.exception,
-      err.stackTrace,
-      reason: err.message,
-    );
+    FirebaseCrashlytics.instance.recordError(err.exception, err.stackTrace, reason: err.message);
   }
 }
 
@@ -76,15 +71,12 @@ class LoggerSnackbar extends StatelessWidget {
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: Colors.red,
-        borderRadius: BorderRadius.circular(10),
-      ),
+      decoration: BoxDecoration(color: Colors.red, borderRadius: BorderRadius.circular(10)),
       child: ListTile(
         contentPadding: const EdgeInsets.all(0),
         leading: const Icon(Icons.error_outline, color: Colors.white),
         title: Text(
-          data.message ?? 'Something went wrong! Please try again later.',
+          data.message ?? context.l10n.somethingWentWrongTryAgain,
           style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
         ),
         trailing: IconButton(

@@ -1,9 +1,13 @@
 import 'dart:async';
+
 import 'package:flutter/material.dart';
+
+import 'package:provider/provider.dart';
+
 import 'package:omi/models/playback_state.dart';
 import 'package:omi/providers/sync_provider.dart';
+import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/widgets/waveform_painter.dart';
-import 'package:provider/provider.dart';
 
 class WaveformSection extends StatefulWidget {
   final int seconds;
@@ -42,7 +46,8 @@ class _WaveformSectionState extends State<WaveformSection> {
   }
 
   void _startProgressTimer() {
-    _progressUpdateTimer = Timer.periodic(const Duration(milliseconds: 100), (timer) {
+    // Use 250ms interval instead of 100ms to reduce CPU usage while maintaining smooth playback
+    _progressUpdateTimer = Timer.periodic(const Duration(milliseconds: 250), (timer) {
       if (mounted && widget.isPlaying) {
         final currentProgress = widget.playbackState.playbackProgress;
         if ((currentProgress - _lastProgress).abs() > 0.01) {
@@ -53,18 +58,12 @@ class _WaveformSectionState extends State<WaveformSection> {
     });
   }
 
-  void _handleWaveformTap(
-    TapDownDetails details,
-    BoxConstraints constraints,
-    SyncProvider syncProvider,
-  ) {
+  void _handleWaveformTap(TapDownDetails details, BoxConstraints constraints, SyncProvider syncProvider) {
     if (widget.playbackState.canPlayOrShare && syncProvider.totalDuration.inMilliseconds > 0 && widget.isPlaying) {
       final localPosition = details.localPosition;
       final containerWidth = constraints.maxWidth;
       final progress = (localPosition.dx / containerWidth).clamp(0.0, 1.0);
-      final seekPosition = Duration(
-        milliseconds: (progress * syncProvider.totalDuration.inMilliseconds).round(),
-      );
+      final seekPosition = Duration(milliseconds: (progress * syncProvider.totalDuration.inMilliseconds).round());
 
       // Perform seek operation asynchronously to avoid blocking UI
       Future.microtask(() => syncProvider.seekToPosition(seekPosition));
@@ -77,9 +76,7 @@ class _WaveformSectionState extends State<WaveformSection> {
       margin: const EdgeInsets.symmetric(horizontal: 24),
       child: Column(
         children: [
-          Expanded(
-            child: _buildWaveformVisualization(context),
-          ),
+          Expanded(child: _buildWaveformVisualization(context)),
           const SizedBox(height: 16),
           _buildTimeIndicators(context),
         ],
@@ -89,22 +86,13 @@ class _WaveformSectionState extends State<WaveformSection> {
 
   Widget _buildWaveformVisualization(BuildContext context) {
     if (widget.isProcessingWaveform) {
-      return const Center(
+      return Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            const CircularProgressIndicator(
-              color: Colors.white70,
-              strokeWidth: 2,
-            ),
+            const CircularProgressIndicator(color: Colors.white70, strokeWidth: 2),
             const SizedBox(height: 12),
-            Text(
-              'Loading your recording...',
-              style: TextStyle(
-                color: Colors.white70,
-                fontSize: 12,
-              ),
-            ),
+            Text(context.l10n.loadingYourRecording, style: const TextStyle(color: Colors.white70, fontSize: 12)),
           ],
         ),
       );
@@ -160,13 +148,14 @@ class _WaveformSectionState extends State<WaveformSection> {
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: timeMarkers
-            .map((marker) => Text(
-                  marker,
-                  style: Theme.of(context).textTheme.labelMedium!.copyWith(
-                        color: Colors.grey.shade500,
-                        fontWeight: FontWeight.w400,
-                      ),
-                ))
+            .map(
+              (marker) => Text(
+                marker,
+                style: Theme.of(
+                  context,
+                ).textTheme.labelMedium!.copyWith(color: Colors.grey.shade500, fontWeight: FontWeight.w400),
+              ),
+            )
             .toList(),
       ),
     );

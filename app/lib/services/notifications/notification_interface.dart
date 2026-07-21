@@ -1,12 +1,14 @@
 import 'dart:async';
+
 import 'package:awesome_notifications/awesome_notifications.dart';
+
 import 'package:omi/backend/schema/message.dart';
 
 /// Common interface for notification services across all platforms
 abstract class NotificationInterface {
   Future<void> initialize();
 
-  void showNotification({
+  Future<void> showNotification({
     required int id,
     required String title,
     required String body,

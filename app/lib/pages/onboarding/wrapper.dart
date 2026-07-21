@@ -1,33 +1,42 @@
 import 'dart:math';
 
-import 'package:firebase_auth/firebase_auth.dart';
+import 'package:omi/utils/platform/platform_manager.dart';
 import 'package:flutter/material.dart';
+
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
-import 'package:omi/backend/preferences.dart';
-import 'package:omi/backend/schema/bt_device/bt_device.dart';
-import 'package:omi/gen/assets.gen.dart';
-import 'package:omi/pages/home/page.dart';
-import 'package:omi/pages/onboarding/auth.dart';
-import 'package:omi/pages/onboarding/find_device/page.dart';
-import 'package:omi/pages/onboarding/name/name_widget.dart';
-import 'package:omi/pages/onboarding/permissions/permissions_widget.dart';
-import 'package:omi/pages/onboarding/primary_language/primary_language_widget.dart';
-import 'package:omi/pages/onboarding/speech_profile_widget.dart';
-import 'package:omi/pages/onboarding/user_review_page.dart';
-import 'package:omi/pages/onboarding/welcome/page.dart';
-import 'package:omi/pages/onboarding/device_onboarding/device_onboarding_wrapper.dart';
-import 'package:omi/providers/home_provider.dart';
-import 'package:omi/providers/onboarding_provider.dart';
-import 'package:omi/services/auth_service.dart';
-import 'package:omi/services/services.dart';
-import 'package:omi/utils/analytics/intercom.dart';
-import 'package:omi/utils/analytics/mixpanel.dart';
-import 'package:omi/utils/other/temp.dart';
-import 'package:omi/widgets/device_widget.dart';
 import 'package:provider/provider.dart';
 
+import 'package:omi/backend/http/api/knowledge_graph_api.dart';
+import 'package:omi/backend/http/api/users.dart';
+import 'package:omi/backend/preferences.dart';
+import 'package:omi/gen/assets.gen.dart';
+import 'package:omi/pages/home/page.dart';
+import 'package:omi/pages/onboarding/ai_consent_widget.dart';
+import 'package:omi/pages/onboarding/auth.dart';
+import 'package:omi/pages/onboarding/found_omi/found_omi_widget.dart';
+import 'package:omi/pages/onboarding/knowledge_graph_step.dart';
+import 'package:omi/pages/onboarding/name/name_widget.dart';
+import 'package:omi/pages/onboarding/permissions/permissions_checker.dart';
+import 'package:omi/pages/onboarding/permissions/permissions_widget.dart';
+import 'package:omi/pages/onboarding/primary_language/primary_language_widget.dart';
+import 'package:omi/pages/onboarding/complete_screen.dart';
+import 'package:omi/pages/onboarding/speech_profile_widget.dart';
+import 'package:omi/pages/onboarding/user_review_page.dart';
+import 'package:omi/providers/home_provider.dart';
+import 'package:omi/providers/onboarding_provider.dart';
+import 'package:omi/providers/speech_profile_provider.dart';
+import 'package:omi/providers/usage_provider.dart';
+import 'package:omi/services/auth_service.dart';
+import 'package:omi/utils/analytics/intercom.dart';
+import 'package:omi/utils/l10n_extensions.dart';
+import 'package:omi/utils/other/temp.dart';
+import 'package:omi/widgets/device_widget.dart';
+
 class OnboardingWrapper extends StatefulWidget {
-  const OnboardingWrapper({super.key});
+  const OnboardingWrapper({super.key, this.forceAuthPage = false});
+
+  final bool forceAuthPage;
 
   @override
   State<OnboardingWrapper> createState() => _OnboardingWrapperState();
@@ -36,32 +45,64 @@ class OnboardingWrapper extends StatefulWidget {
 class _OnboardingWrapperState extends State<OnboardingWrapper> with TickerProviderStateMixin {
   // Onboarding page indices
   static const int kAuthPage = 0;
-  static const int kNamePage = 1;
-  static const int kPrimaryLanguagePage = 2;
-  static const int kPermissionsPage = 3;
-  static const int kUserReviewPage = 4;
-  static const int kWelcomePage = 5;
-  static const int kFindDevicesPage = 6;
-  static const int kSpeechProfilePage = 7; // Now always the last index
+  static const int kAiConsentPage = 1; // Data-and-AI disclosure with explicit consent
+  static const int kNamePage = 2;
+  static const int kPrimaryLanguagePage = 3;
+  static const int kFoundOmiPage = 4;
+  static const int kPermissionsPage = 5;
+  static const int kUserReviewPage = 6; // "Loving Omi?" screen
+  static const int kWelcomePage = 7;
+  static const int kFindDevicesPage = 8;
+  static const int kSpeechProfilePage = 9; // Speech profile with questions (requires device)
+  static const int kKnowledgeGraphPage = 10; // Memory graph preview
+  static const int kCompletePage = 11; // "You're all set" completion screen
 
   // Special index values used in comparisons
-  static const List<int> kHiddenHeaderPages = [-1, 0, 1, 2, 3, 4, 5, 6, 7];
+  static const List<int> kHiddenHeaderPages = [
+    -1,
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+  ];
 
   TabController? _controller;
   late AnimationController _backgroundAnimationController;
   late Animation<double> _backgroundFadeAnimation;
   String _currentBackgroundImage = Assets.images.onboardingBg2.path;
   bool get hasSpeechProfile => SharedPreferencesUtil().hasSpeakerProfile;
+  SpeechProfileProvider? _speechProfileProvider;
+  Future<void>? _knowledgeGraphPrebuildFuture;
 
   @override
   void initState() {
-    _controller = TabController(length: 8, vsync: this);
+    if (!widget.forceAuthPage) {
+      _speechProfileProvider = SpeechProfileProvider();
+    }
+    _controller = TabController(
+      length: 12,
+      vsync: this,
+    ); // Auth, AiConsent, Name, Lang, FoundOmi, Permissions, Review, Welcome, FindDevices, SpeechProfile, KnowledgeGraph, Complete
     _controller!.addListener(() {
+      if (!mounted) return;
       setState(() {});
       // Update background image when page changes
       _updateBackgroundImage(_controller!.index);
       // Precache next image for smoother transitions
       _precacheNextImage(_controller!.index);
+      if (_controller!.index == kSpeechProfilePage && _knowledgeGraphPrebuildFuture == null) {
+        _knowledgeGraphPrebuildFuture = _prebuildKnowledgeGraph().catchError(
+          (_) {},
+        );
+      }
     });
 
     // Initialize animation controllers
@@ -71,13 +112,12 @@ class _OnboardingWrapperState extends State<OnboardingWrapper> with TickerProvid
     );
 
     // Initialize animations
-    _backgroundFadeAnimation = Tween<double>(
-      begin: 0.0,
-      end: 1.0,
-    ).animate(CurvedAnimation(
-      parent: _backgroundAnimationController,
-      curve: Curves.easeInOut,
-    ));
+    _backgroundFadeAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(
+      CurvedAnimation(
+        parent: _backgroundAnimationController,
+        curve: Curves.easeInOut,
+      ),
+    );
 
     // Start initial animations
     _backgroundAnimationController.forward();
@@ -87,12 +127,19 @@ class _OnboardingWrapperState extends State<OnboardingWrapper> with TickerProvid
       //   context.read<OnboardingProvider>().updatePermissions();
       // }
 
-      if (AuthService.instance.isSignedIn()) {
+      if (!widget.forceAuthPage && AuthService.instance.isSignedIn()) {
         // && !SharedPreferencesUtil().onboardingCompleted
         if (mounted) {
           context.read<HomeProvider>().setupHasSpeakerProfile();
-          if (SharedPreferencesUtil().onboardingCompleted) {
-            routeToPage(context, const HomePageWrapper(), replace: true);
+          // The consent gate is checked first and is independent of the
+          // server-side onboardingCompleted flag. This ensures every user
+          // — including someone signing back into a previously-onboarded
+          // account on a fresh install — sees the consent screen at least
+          // once before any AI processing begins.
+          if (!SharedPreferencesUtil().aiConsentGiven) {
+            _controller!.animateTo(kAiConsentPage);
+          } else if (SharedPreferencesUtil().onboardingCompleted) {
+            await _routeWithPermissionsCheck(context);
           } else {
             _controller!.animateTo(kNamePage);
           }
@@ -107,13 +154,52 @@ class _OnboardingWrapperState extends State<OnboardingWrapper> with TickerProvid
   void dispose() {
     _controller?.dispose();
     _backgroundAnimationController.dispose();
+    _speechProfileProvider?.dispose();
     super.dispose();
+  }
+
+  Future<void> _routeWithPermissionsCheck(BuildContext context) async {
+    if (!SharedPreferencesUtil().permissionsCompleted) {
+      final granted = await arePermissionsGranted();
+      if (!granted) {
+        if (context.mounted) {
+          routeToPage(
+            context,
+            const PermissionsInterstitialPage(),
+            replace: true,
+          );
+        }
+        return;
+      }
+      SharedPreferencesUtil().permissionsCompleted = true;
+    }
+    if (context.mounted) {
+      routeToPage(context, const HomePageWrapper(), replace: true);
+    }
   }
 
   _goNext() {
     if (_controller!.index < _controller!.length - 1) {
       _controller!.animateTo(_controller!.index + 1);
     }
+  }
+
+  Future<void> _prebuildKnowledgeGraph() async {
+    try {
+      final current = await KnowledgeGraphApi.getKnowledgeGraph();
+      final nodes = current['nodes'] as List<dynamic>? ?? const [];
+      final hasGraph = nodes.any((node) => (node['id'] ?? '') != 'user-node');
+      if (hasGraph) return;
+    } catch (_) {
+      // Continue to rebuild below.
+    }
+
+    await KnowledgeGraphApi.rebuildKnowledgeGraph();
+    await KnowledgeGraphApi.waitForGraphStability(
+      timeout: const Duration(seconds: 25),
+      interval: const Duration(seconds: 2),
+      stabilityChecks: 1,
+    );
   }
 
   void _updateBackgroundImage(int pageIndex) {
@@ -123,16 +209,31 @@ class _OnboardingWrapperState extends State<OnboardingWrapper> with TickerProvid
       case kAuthPage:
         newImage = Assets.images.onboardingBg2.path;
         break;
+      case kAiConsentPage:
+        newImage = Assets.images.onboardingBg2.path;
+        break;
       case kNamePage:
         newImage = Assets.images.onboardingBg1.path;
         break;
       case kPrimaryLanguagePage:
         newImage = Assets.images.onboardingBg4.path;
         break;
+      case kFoundOmiPage:
+        newImage = Assets.images.onboardingBg1.path;
+        break;
       case kPermissionsPage:
         newImage = Assets.images.onboardingBg3.path;
         break;
       case kUserReviewPage:
+        newImage = Assets.images.onboardingBg6.path;
+        break;
+      case kSpeechProfilePage:
+        newImage = Assets.images.onboardingBg3.path;
+        break;
+      case kKnowledgeGraphPage:
+        newImage = Assets.images.onboardingBg6.path;
+        break;
+      case kCompletePage:
         newImage = Assets.images.onboardingBg6.path;
         break;
       default:
@@ -169,115 +270,155 @@ class _OnboardingWrapperState extends State<OnboardingWrapper> with TickerProvid
     switch (pageIndex) {
       case kAuthPage:
         return Assets.images.onboardingBg2.path;
+      case kAiConsentPage:
+        return Assets.images.onboardingBg2.path;
       case kNamePage:
         return Assets.images.onboardingBg1.path;
       case kPrimaryLanguagePage:
         return Assets.images.onboardingBg4.path;
+      case kFoundOmiPage:
+        return Assets.images.onboardingBg1.path;
       case kPermissionsPage:
         return Assets.images.onboardingBg3.path;
       case kUserReviewPage:
+        return Assets.images.onboardingBg6.path;
+      case kSpeechProfilePage:
+        return Assets.images.onboardingBg3.path;
+      case kKnowledgeGraphPage:
+        return Assets.images.onboardingBg6.path;
+      case kCompletePage:
         return Assets.images.onboardingBg6.path;
       default:
         return null;
     }
   }
 
-  // TODO: use connection directly
-  Future<BleAudioCodec> _getAudioCodec(String deviceId) async {
-    var connection = await ServiceManager.instance().device.ensureConnection(deviceId);
-    if (connection == null) {
-      return BleAudioCodec.pcm8;
-    }
-    return connection.getAudioCodec();
-  }
-
   @override
   Widget build(BuildContext context) {
     List<Widget> pages = [
       AuthComponent(
-        onSignIn: () {
-          SharedPreferencesUtil().hasOmiDevice = true;
-          SharedPreferencesUtil().verifiedPersonaId = null;
-          MixpanelManager().onboardingStepCompleted('Auth');
+        onSignIn: () async {
+          if (!mounted) return;
+          PlatformManager.instance.analytics.onboardingStepCompleted('Auth');
           context.read<HomeProvider>().setupHasSpeakerProfile();
-          IntercomManager.instance.loginIdentifiedUser(SharedPreferencesUtil().uid);
-          if (SharedPreferencesUtil().onboardingCompleted) {
-            routeToPage(context, const HomePageWrapper(), replace: true);
+          // Refresh subscription on sign-in: AppShell only fetches it on mount,
+          // so an in-session re-login would otherwise leave it null until the
+          // Plan & Usage page is opened (missing Pro badge).
+          context.read<UsageProvider>().fetchSubscription();
+          IntercomManager.instance.loginIdentifiedUser(
+            SharedPreferencesUtil().uid,
+          );
+          // Consent is checked first regardless of server-side onboarding
+          // state so a returning user signing in on a fresh install still
+          // sees the consent screen before any AI processing begins.
+          if (!SharedPreferencesUtil().aiConsentGiven) {
+            _controller!.animateTo(kAiConsentPage);
+          } else if (SharedPreferencesUtil().onboardingCompleted) {
+            await _routeWithPermissionsCheck(context);
           } else {
-            _goNext(); // Go to Name page
+            _controller!.animateTo(kNamePage);
           }
         },
       ),
-      NameWidget(goNext: () {
-        _goNext(); // Go to Primary Language page
-        IntercomManager.instance.updateUser(
-          FirebaseAuth.instance.currentUser!.email,
-          FirebaseAuth.instance.currentUser!.displayName,
-          FirebaseAuth.instance.currentUser!.uid,
-        );
-        MixpanelManager().onboardingStepCompleted('Name');
-      }),
-      PrimaryLanguageWidget(goNext: () {
-        _goNext(); // Go to Permissions page
-        MixpanelManager().onboardingStepCompleted('Primary Language');
-      }),
+      AiConsentWidget(
+        onAgree: () async {
+          if (!mounted) return;
+          SharedPreferencesUtil().aiConsentGiven = true;
+          PlatformManager.instance.analytics.onboardingStepCompleted(
+            'AI Consent',
+          );
+          // If the server says this user already completed onboarding, jump
+          // straight to home — their first-time onboarding ran in a previous
+          // session and we don't want to re-run it.
+          if (SharedPreferencesUtil().onboardingCompleted) {
+            await _routeWithPermissionsCheck(context);
+          } else {
+            _controller!.animateTo(kNamePage);
+          }
+        },
+      ),
+      NameWidget(
+        goNext: () {
+          _goNext(); // Go to Primary Language page
+          IntercomManager.instance.updateUser(
+            FirebaseAuth.instance.currentUser!.email,
+            FirebaseAuth.instance.currentUser!.displayName,
+            FirebaseAuth.instance.currentUser!.uid,
+          );
+          PlatformManager.instance.analytics.onboardingStepCompleted('Name');
+        },
+      ),
+      PrimaryLanguageWidget(
+        goNext: () {
+          _goNext(); // Go to Found Omi page
+          PlatformManager.instance.analytics.onboardingStepCompleted(
+            'Primary Language',
+          );
+        },
+      ),
+      FoundOmiWidget(
+        goNext: () {
+          _goNext(); // Go to Permissions page
+          PlatformManager.instance.analytics.onboardingStepCompleted(
+            'Acquisition Source',
+          );
+        },
+      ),
       PermissionsWidget(
         goNext: () {
           _goNext(); // Go to User Review page
-          MixpanelManager().onboardingStepCompleted('Permissions');
+          PlatformManager.instance.analytics.onboardingStepCompleted(
+            'Permissions',
+          );
         },
       ),
       UserReviewPage(
         goNext: () {
-          _goNext(); // Go to Welcome page
-          MixpanelManager().onboardingStepCompleted('User Review');
+          // Go directly to Speech Profile (skip device steps - we use phone mic now)
+          _controller!.animateTo(kSpeechProfilePage);
+          PlatformManager.instance.analytics.onboardingStepCompleted(
+            'User Review',
+          );
         },
       ),
-      WelcomePage(
-        goNext: () {
-          _goNext(); // Go to Find Devices page
-          MixpanelManager().onboardingStepCompleted('Welcome');
+      // Placeholder pages - not used in new flow but kept for index consistency
+      Container(), // WelcomePage placeholder
+      Container(), // FindDevicesPage placeholder
+      widget.forceAuthPage
+          ? const SizedBox.shrink()
+          : ChangeNotifierProvider.value(
+              value: _speechProfileProvider!,
+              child: SpeechProfileWidget(
+                goNext: () {
+                  PlatformManager.instance.analytics.onboardingStepCompleted(
+                    'Speech Profile',
+                  );
+                  _controller!.animateTo(kKnowledgeGraphPage);
+                },
+                onSkip: () {
+                  PlatformManager.instance.analytics.onboardingStepCompleted(
+                    'Speech Profile Skipped',
+                  );
+                  _controller!.animateTo(kKnowledgeGraphPage);
+                },
+              ),
+            ),
+      OnboardingKnowledgeGraphStep(
+        onContinue: () {
+          PlatformManager.instance.analytics.onboardingStepCompleted(
+            'Knowledge Graph',
+          );
+          _controller!.animateTo(kCompletePage);
         },
-        onSkip: () {
-          // Complete onboarding and go to homepage
+      ),
+      OnboardingCompleteScreen(
+        onComplete: () {
           SharedPreferencesUtil().onboardingCompleted = true;
-          MixpanelManager().onboardingStepCompleted('Welcome Skipped');
+          SharedPreferencesUtil().permissionsCompleted = true;
+          updateUserOnboardingState(completed: true);
+          PlatformManager.instance.analytics.onboardingCompleted();
+          PaintingBinding.instance.imageCache.clear();
           routeToPage(context, const HomePageWrapper(), replace: true);
-        },
-      ),
-      FindDevicesPage(
-        isFromOnboarding: true,
-        onSkip: () {
-          // Skipping device finding means skipping speech profile and device onboarding too
-          SharedPreferencesUtil().onboardingCompleted = true;
-          routeToPage(context, const HomePageWrapper(), replace: true);
-        },
-        goNext: () async {
-          var provider = context.read<OnboardingProvider>();
-          MixpanelManager().onboardingStepCompleted('Find Devices');
-
-          if (hasSpeechProfile) {
-            // Skip speech profile, go directly to device onboarding
-            routeToPage(context, const DeviceOnboardingWrapper(), replace: true);
-          } else {
-            var codec = await _getAudioCodec(provider.deviceId);
-            if (codec.isOpusSupported()) {
-              _goNext(); // Go to Speech Profile page
-            } else {
-              // Device selected, but not Opus, skip speech profile and go to device onboarding
-              routeToPage(context, const DeviceOnboardingWrapper(), replace: true);
-            }
-          }
-        },
-      ),
-      SpeechProfileWidget(
-        goNext: () {
-          routeToPage(context, const DeviceOnboardingWrapper(), replace: true);
-          MixpanelManager().onboardingStepCompleted('Speech Profile');
-        },
-        onSkip: () {
-          routeToPage(context, const DeviceOnboardingWrapper(), replace: true);
-          MixpanelManager().onboardingStepCompleted('Speech Profile Skipped');
         },
       ),
     ];
@@ -312,15 +453,20 @@ class _OnboardingWrapperState extends State<OnboardingWrapper> with TickerProvid
                   pages[kAuthPage],
                 ],
               )
-            : _controller!.index == kNamePage ||
+            : _controller!.index == kAiConsentPage ||
+                    _controller!.index == kNamePage ||
                     _controller!.index == kPrimaryLanguagePage ||
+                    _controller!.index == kFoundOmiPage ||
                     _controller!.index == kPermissionsPage ||
                     _controller!.index == kUserReviewPage ||
-                    _controller!.index == kWelcomePage
+                    _controller!.index == kWelcomePage ||
+                    _controller!.index == kSpeechProfilePage ||
+                    _controller!.index == kKnowledgeGraphPage ||
+                    _controller!.index == kCompletePage
                 ? Stack(
                     children: [
-                      // Animated background image for name, language, permissions, and user review pages (not welcome page)
-                      if (_controller!.index != kWelcomePage)
+                      // Animated background image (skip for welcome and complete pages)
+                      if (_controller!.index != kWelcomePage && _controller!.index != kCompletePage)
                         FadeTransition(
                           opacity: _backgroundFadeAnimation,
                           child: Container(
@@ -329,9 +475,15 @@ class _OnboardingWrapperState extends State<OnboardingWrapper> with TickerProvid
                               image: DecorationImage(
                                 image: ResizeImage(
                                   AssetImage(_currentBackgroundImage),
-                                  width: (MediaQuery.of(context).size.width * MediaQuery.of(context).devicePixelRatio)
+                                  width: (MediaQuery.of(context).size.width *
+                                          MediaQuery.of(
+                                            context,
+                                          ).devicePixelRatio)
                                       .round(),
-                                  height: (MediaQuery.of(context).size.height * MediaQuery.of(context).devicePixelRatio)
+                                  height: (MediaQuery.of(context).size.height *
+                                          MediaQuery.of(
+                                            context,
+                                          ).devicePixelRatio)
                                       .round(),
                                 ),
                                 fit: BoxFit.cover,
@@ -341,15 +493,14 @@ class _OnboardingWrapperState extends State<OnboardingWrapper> with TickerProvid
                         ),
                       // Page component (no transition for content)
                       pages[_controller!.index],
-                      // Progress dots for name, language, permissions, user review, and welcome pages
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(16, 56, 16, 0),
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: List.generate(
-                            7,
-                            (index) {
-                              int pageIndex = index + 1; // Name=1, Lang=2, ..., Speech=7
+                      // Progress dots (hidden on AI consent and complete pages)
+                      if (_controller!.index != kCompletePage && _controller!.index != kAiConsentPage)
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(16, 56, 16, 0),
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: List.generate(9, (index) {
+                              int pageIndex = index + 2; // Name=2, Lang=3, ..., KnowledgeGraph=10
                               return Container(
                                 margin: const EdgeInsets.symmetric(horizontal: 4.0),
                                 width: pageIndex == _controller!.index ? 12.0 : 8.0,
@@ -361,12 +512,11 @@ class _OnboardingWrapperState extends State<OnboardingWrapper> with TickerProvid
                                   shape: BoxShape.circle,
                                 ),
                               );
-                            },
+                            }),
                           ),
                         ),
-                      ),
-                      // Back button for language and permissions pages
-                      if (_controller!.index > kNamePage)
+                      // Back button (hidden on complete page)
+                      if (_controller!.index > kNamePage && _controller!.index != kCompletePage)
                         Padding(
                           padding: const EdgeInsets.fromLTRB(16, 40, 0, 0),
                           child: Align(
@@ -376,17 +526,24 @@ class _OnboardingWrapperState extends State<OnboardingWrapper> with TickerProvid
                               height: 36,
                               margin: const EdgeInsets.all(8),
                               decoration: BoxDecoration(
-                                color: Colors.grey.withOpacity(0.3),
+                                color: Colors.grey.withValues(alpha: 0.3),
                                 shape: BoxShape.circle,
                               ),
                               child: IconButton(
                                 padding: EdgeInsets.zero,
                                 onPressed: () {
-                                  if (_controller!.index > kNamePage) {
+                                  if (_controller!.index == kSpeechProfilePage) {
+                                    _speechProfileProvider?.close();
+                                    _controller!.animateTo(kUserReviewPage);
+                                  } else if (_controller!.index > kNamePage) {
                                     _controller!.animateTo(_controller!.index - 1);
                                   }
                                 },
-                                icon: const FaIcon(FontAwesomeIcons.arrowLeft, size: 16.0, color: Colors.white),
+                                icon: FaIcon(
+                                  FontAwesomeIcons.arrowLeft,
+                                  size: 16.0,
+                                  color: Colors.white,
+                                ),
                               ),
                             ),
                           ),
@@ -415,22 +572,39 @@ class _OnboardingWrapperState extends State<OnboardingWrapper> with TickerProvid
                               kHiddenHeaderPages.contains(_controller?.index)
                                   ? const SizedBox.shrink()
                                   : Padding(
-                                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 16,
+                                      ),
                                       child: Text(
-                                        'Your personal growth journey with AI that listens to your every word.',
-                                        style: TextStyle(color: Colors.grey.shade300, fontSize: 24),
+                                        context.l10n.personalGrowthJourney,
+                                        style: TextStyle(
+                                          color: Colors.grey.shade300,
+                                          fontSize: 24,
+                                        ),
                                         textAlign: TextAlign.center,
                                       ),
                                     ),
                               SizedBox(
                                 height:
                                     (_controller!.index == kFindDevicesPage || _controller!.index == kSpeechProfilePage)
-                                        ? max(MediaQuery.of(context).size.height - 500 - 10,
-                                            maxHeightWithTextScale(context, _controller!.index))
-                                        : max(MediaQuery.of(context).size.height - 500 - 30,
-                                            maxHeightWithTextScale(context, _controller!.index)),
+                                        ? max(
+                                            MediaQuery.of(context).size.height - 500 - 10,
+                                            maxHeightWithTextScale(
+                                              context,
+                                              _controller!.index,
+                                            ),
+                                          )
+                                        : max(
+                                            MediaQuery.of(context).size.height - 500 - 30,
+                                            maxHeightWithTextScale(
+                                              context,
+                                              _controller!.index,
+                                            ),
+                                          ),
                                 child: Padding(
-                                  padding: EdgeInsets.only(bottom: MediaQuery.sizeOf(context).height <= 700 ? 10 : 64),
+                                  padding: EdgeInsets.only(
+                                    bottom: MediaQuery.sizeOf(context).height <= 700 ? 10 : 64,
+                                  ),
                                   child: TabBarView(
                                     controller: _controller,
                                     physics: const NeverScrollableScrollPhysics(),
@@ -451,43 +625,51 @@ class _OnboardingWrapperState extends State<OnboardingWrapper> with TickerProvid
                                 height: 36,
                                 margin: const EdgeInsets.all(8),
                                 decoration: BoxDecoration(
-                                  color: Colors.grey.withOpacity(0.3),
+                                  color: Colors.grey.withValues(alpha: 0.3),
                                   shape: BoxShape.circle,
                                 ),
                                 child: IconButton(
                                   padding: EdgeInsets.zero,
                                   onPressed: () {
-                                    if (_controller!.index > kNamePage) {
-                                      _controller!.animateTo(_controller!.index - 1);
+                                    if (_controller!.index == kSpeechProfilePage) {
+                                      _speechProfileProvider?.close();
+                                      _controller!.animateTo(kUserReviewPage);
+                                    } else if (_controller!.index > kNamePage) {
+                                      _controller!.animateTo(
+                                        _controller!.index - 1,
+                                      );
                                     }
                                   },
-                                  icon: const FaIcon(FontAwesomeIcons.arrowLeft, size: 16.0, color: Colors.white),
+                                  icon: FaIcon(
+                                    FontAwesomeIcons.arrowLeft,
+                                    size: 16.0,
+                                    color: Colors.white,
+                                  ),
                                 ),
                               ),
                             ),
                           ),
-                        if (_controller!.index != kAuthPage)
+                        if (_controller!.index != kAuthPage && _controller!.index != kAiConsentPage)
                           Padding(
                             padding: const EdgeInsets.fromLTRB(16, 56, 16, 0),
                             child: Row(
                               mainAxisAlignment: MainAxisAlignment.center,
-                              children: List.generate(
-                                6,
-                                (index) {
-                                  int pageIndex = index + 1; // Name=1, Lang=2, ..., Speech=6
-                                  return Container(
-                                    margin: const EdgeInsets.symmetric(horizontal: 4.0),
-                                    width: pageIndex == _controller!.index ? 12.0 : 8.0,
-                                    height: pageIndex == _controller!.index ? 12.0 : 8.0,
-                                    decoration: BoxDecoration(
-                                      color: pageIndex <= _controller!.index
-                                          ? Theme.of(context).colorScheme.secondary
-                                          : Colors.grey.shade400,
-                                      shape: BoxShape.circle,
-                                    ),
-                                  );
-                                },
-                              ),
+                              children: List.generate(7, (index) {
+                                int pageIndex = index + 2; // Name=2, Lang=3, ..., Speech=8
+                                return Container(
+                                  margin: const EdgeInsets.symmetric(
+                                    horizontal: 4.0,
+                                  ),
+                                  width: pageIndex == _controller!.index ? 12.0 : 8.0,
+                                  height: pageIndex == _controller!.index ? 12.0 : 8.0,
+                                  decoration: BoxDecoration(
+                                    color: pageIndex <= _controller!.index
+                                        ? Theme.of(context).colorScheme.secondary
+                                        : Colors.grey.shade400,
+                                    shape: BoxShape.circle,
+                                  ),
+                                );
+                              }),
                             ),
                           ),
                       ],

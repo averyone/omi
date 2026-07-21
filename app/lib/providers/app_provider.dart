@@ -1,17 +1,23 @@
 import 'dart:async';
+
+import 'package:omi/utils/platform/platform_manager.dart';
 import 'package:collection/collection.dart';
-import 'package:flutter/widgets.dart';
+
 import 'package:omi/backend/http/api/apps.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/app.dart';
+import 'package:omi/app_globals.dart';
 import 'package:omi/providers/base_provider.dart';
 import 'package:omi/utils/alerts/app_dialog.dart';
 import 'package:omi/utils/alerts/app_snackbar.dart';
-import 'package:omi/utils/analytics/mixpanel.dart';
+import 'package:omi/utils/l10n_extensions.dart';
+import 'package:omi/utils/logger.dart';
 
 class AppProvider extends BaseProvider {
   List<App> apps = [];
   List<App> popularApps = [];
+  // v2 grouped apps: [{ category: {id,title}, data: List<App>, pagination: {...} }]
+  List<Map<String, dynamic>> groupedApps = [];
 
   bool filterChat = true;
   bool filterMemories = true;
@@ -27,11 +33,13 @@ class AppProvider extends BaseProvider {
   bool appPublicToggled = false;
 
   bool isLoading = false;
+  bool isSearching = false;
 
   List<Category> categories = [];
   List<AppCapability> capabilities = [];
   Map<String, dynamic> filters = {};
   List<App> filteredApps = [];
+  List<App> searchResults = [];
 
   List<App> get userPrivateApps => apps.where((app) => app.private).toList();
 
@@ -54,16 +62,16 @@ class AppProvider extends BaseProvider {
   }
 
   Future<App?> getAppDetails(String id) async {
-    var app = await getAppDetailsServer(id);
-    if (app != null) {
+    var appData = await getAppDetailsServer(id);
+    if (appData != null) {
+      var freshApp = App.fromJson(appData);
       var oldApp = apps.where((element) => element.id == id).firstOrNull;
-      if (oldApp == null) {
-        return null;
+      if (oldApp != null) {
+        var idx = apps.indexOf(oldApp);
+        apps[idx] = freshApp;
+        notifyListeners();
       }
-      var idx = apps.indexOf(oldApp);
-      apps[idx] = App.fromJson(app);
-      notifyListeners();
-      return apps[idx];
+      return freshApp;
     }
     return null;
   }
@@ -74,6 +82,8 @@ class AppProvider extends BaseProvider {
   }
 
   void addOrRemoveFilter(String filter, String filterGroup) {
+    bool isAdding = !filters.containsKey(filterGroup) || filters[filterGroup] != filter;
+
     if (filters.containsKey(filterGroup)) {
       if (filters[filterGroup] == filter) {
         filters.remove(filterGroup);
@@ -83,11 +93,32 @@ class AppProvider extends BaseProvider {
     } else {
       filters.addAll({filterGroup: filter});
     }
-    filterApps();
+
+    // Track filter changes
+    if (filterGroup == 'Apps') {
+      if (filter == 'My Apps') {
+        PlatformManager.instance.analytics.appsFilterMyApps(enabled: isAdding);
+      } else if (filter == 'Installed Apps') {
+        PlatformManager.instance.analytics.appsFilterInstalled(enabled: isAdding);
+      }
+    } else if (filterGroup == 'Rating') {
+      if (isAdding) {
+        String ratingStr = filter.replaceAll('+ Stars', '').trim();
+        int? rating = int.tryParse(ratingStr);
+        if (rating != null) {
+          PlatformManager.instance.analytics.appsFilterRating(rating: rating);
+        }
+      }
+    } else if (filterGroup == 'Sort' && isAdding) {
+      PlatformManager.instance.analytics.appsSortChanged(sortOption: filter);
+    }
+
     notifyListeners();
   }
 
   void addOrRemoveCategoryFilter(Category category) {
+    bool isAdding = !filters.containsKey('Category') || filters['Category'] != category;
+
     if (filters.containsKey('Category')) {
       if (filters['Category'] == category) {
         filters.remove('Category');
@@ -97,11 +128,18 @@ class AppProvider extends BaseProvider {
     } else {
       filters.addAll({'Category': category});
     }
-    filterApps();
+
+    // Track category filter
+    if (isAdding) {
+      PlatformManager.instance.analytics.appsFilterCategory(category: category.title);
+    }
+
     notifyListeners();
   }
 
   void addOrRemoveCapabilityFilter(AppCapability capability) {
+    bool isAdding = !filters.containsKey('Capabilities') || filters['Capabilities'] != capability;
+
     if (filters.containsKey('Capabilities')) {
       if (filters['Capabilities'] == capability) {
         filters.remove('Capabilities');
@@ -111,7 +149,12 @@ class AppProvider extends BaseProvider {
     } else {
       filters.addAll({'Capabilities': capability});
     }
-    filterApps();
+
+    // Track capability filter
+    if (isAdding) {
+      PlatformManager.instance.analytics.appsFilterCapability(capability: capability.title);
+    }
+
     notifyListeners();
   }
 
@@ -133,6 +176,16 @@ class AppProvider extends BaseProvider {
     notifyListeners();
   }
 
+  void clearUserData() {
+    apps = [];
+    popularApps = [];
+    groupedApps = [];
+    searchResults = [];
+    filteredApps = [];
+    filters = {};
+    notifyListeners();
+  }
+
   void removeFilter(String filterGroup) {
     filters.remove(filterGroup);
     filterApps();
@@ -147,29 +200,139 @@ class AppProvider extends BaseProvider {
     return searchQuery.isNotEmpty;
   }
 
-  void searchApps(String query) {
+  void searchApps(String query) async {
     searchQuery = query.toLowerCase();
-    filterApps();
-    notifyListeners();
+
+    if (query.trim().isEmpty && !_hasServerSideFilters()) {
+      searchResults = [];
+      isSearching = false;
+      filterApps();
+      notifyListeners();
+      return;
+    }
+
+    await performServerSearch();
+  }
+
+  bool _hasServerSideFilters() {
+    return filters.containsKey('Category') ||
+        filters.containsKey('Rating') ||
+        filters.containsKey('Capabilities') ||
+        filters.containsKey('Apps');
+  }
+
+  String _pendingSearchQuery = '';
+
+  Future<void> performServerSearch() async {
+    // Always update pending query to the latest
+    _pendingSearchQuery = searchQuery;
+
+    if (isSearching) {
+      return;
+    }
+
+    final queryBeingSearched = searchQuery;
+
+    try {
+      isSearching = true;
+      notifyListeners();
+
+      String? categoryFilter;
+      if (filters.containsKey('Category') && filters['Category'] is Category) {
+        categoryFilter = (filters['Category'] as Category).id;
+      }
+
+      // Get rating filter if active
+      double? minRating;
+      if (filters.containsKey('Rating') && filters['Rating'] is String) {
+        String ratingStr = (filters['Rating'] as String).replaceAll('+ Stars', '');
+        minRating = double.tryParse(ratingStr);
+      }
+
+      // Get capability filter if active
+      String? capabilityFilter;
+      if (filters.containsKey('Capabilities') && filters['Capabilities'] is AppCapability) {
+        capabilityFilter = (filters['Capabilities'] as AppCapability).id;
+      }
+
+      // Get "My Apps" filter
+      bool? myAppsFilter;
+      if (filters.containsKey('Apps') && filters['Apps'] == 'My Apps') {
+        myAppsFilter = true;
+      }
+
+      // Get "Installed Apps" filter
+      bool? installedAppsFilter;
+      if (filters.containsKey('Apps') && filters['Apps'] == 'Installed Apps') {
+        installedAppsFilter = true;
+      }
+
+      final result = await retrieveAppsSearch(
+        query: queryBeingSearched.isEmpty ? null : queryBeingSearched,
+        category: categoryFilter,
+        minRating: minRating,
+        capability: capabilityFilter,
+        myApps: myAppsFilter,
+        installedApps: installedAppsFilter,
+        offset: 0,
+        limit: 100,
+      );
+
+      if (queryBeingSearched == _pendingSearchQuery) {
+        searchResults = result.apps;
+        filteredApps = result.apps;
+
+        // Track search if there was a query
+        if (queryBeingSearched.isNotEmpty) {
+          PlatformManager.instance.analytics.appsSearched(
+            searchTerm: queryBeingSearched,
+            resultCount: result.apps.length,
+          );
+        }
+      }
+    } catch (e) {
+      filterApps();
+    } finally {
+      isSearching = false;
+      notifyListeners();
+
+      if (_pendingSearchQuery != queryBeingSearched) {
+        performServerSearch();
+      }
+    }
+  }
+
+  Future<void> applyFilters() async {
+    if (isSearchActive() || _hasServerSideFilters()) {
+      await performServerSearch();
+    } else {
+      filterApps();
+      notifyListeners();
+    }
   }
 
   void filterApps() {
-    // Performance optimization: Early return if no apps
-    if (apps.isEmpty) {
+    if (_hasServerSideFilters() && searchResults.isNotEmpty) {
+      filteredApps = searchResults;
+      return;
+    }
+
+    if (apps.isEmpty && searchResults.isEmpty) {
       filteredApps = [];
       return;
     }
 
-    // Performance optimization: Cache commonly used values
+    if (apps.isEmpty && searchResults.isNotEmpty) {
+      filteredApps = searchResults;
+      return;
+    }
+
     final currentUid = SharedPreferencesUtil().uid;
     final lowercaseQuery = searchQuery.toLowerCase();
 
-    // Use where clause directly on list instead of chaining iterables for better performance
     List<App> result = apps.where((app) {
-      // Apply all filters in a single pass for better performance
       bool passesFilters = true;
 
-      // Apply filter conditions
       for (final entry in filters.entries) {
         final key = entry.key;
         final value = entry.value;
@@ -201,11 +364,9 @@ class AppProvider extends BaseProvider {
             break;
         }
 
-        // Early exit if filter fails
         if (!passesFilters) break;
       }
 
-      // Apply search filter
       if (passesFilters && lowercaseQuery.isNotEmpty) {
         passesFilters = app.name.toLowerCase().contains(lowercaseQuery);
       }
@@ -213,7 +374,6 @@ class AppProvider extends BaseProvider {
       return passesFilters;
     }).toList();
 
-    // Apply sorting if needed
     final Comparator<App>? comparator = _getSortComparator();
     if (comparator != null) {
       result.sort(comparator);
@@ -249,7 +409,7 @@ class AppProvider extends BaseProvider {
         notifyListeners(); // This should notify as it affects UI state
       }
     } else {
-      print("Error: Attempted to set loading state for invalid index $index");
+      Logger.debug("Error: Attempted to set loading state for invalid index $index");
     }
   }
 
@@ -269,16 +429,37 @@ class AppProvider extends BaseProvider {
         setAppsFromCache();
       }
 
-      // Fetch fresh data from server
-      final freshApps = await retrieveApps();
-      apps = freshApps;
+      // Fetch grouped apps and user's enabled app IDs in parallel
+      final results = await Future.wait([
+        retrieveAppsGrouped(offset: 0, limit: 20, includeReviews: true),
+        getEnabledAppsServer(),
+      ]);
+      final groups = results[0] as List<Map<String, dynamic>>;
+      final enabledAppIds = (results[1] as List<String>).toSet();
+
+      groupedApps = groups;
+
+      // Flatten for search/filter views
+      final List<App> flat = [];
+      for (final g in groups) {
+        final List<App> data = (g['data'] as List<App>? ?? <App>[]);
+        flat.addAll(data);
+      }
+      apps = flat;
+
+      // Set enabled state from server
+      for (final app in apps) {
+        app.enabled = enabledAppIds.contains(app.id);
+      }
+
       appLoading = List.filled(apps.length, false, growable: true);
 
       // Delay filtering to prevent UI freezing with large datasets
       await Future.delayed(const Duration(milliseconds: 50));
       filterApps();
+      updatePrefApps();
     } catch (e) {
-      debugPrint('Error loading apps: $e');
+      Logger.debug('Error loading apps: $e');
       // Fallback to cached data
       setAppsFromCache();
     } finally {
@@ -293,7 +474,7 @@ class AppProvider extends BaseProvider {
       setIsLoading(true);
       popularApps = await retrievePopularApps();
     } catch (e) {
-      debugPrint('Error loading popular apps: $e');
+      Logger.debug('Error loading popular apps: $e');
       // Fallback to cached data or empty list
       popularApps = [];
     } finally {
@@ -366,13 +547,21 @@ class AppProvider extends BaseProvider {
         }
         filteredApps.removeWhere((app) => app.id == appId);
         updatePrefApps();
-        AppSnackbar.showSnackbarSuccess('App deleted successfully 🗑️');
+        final context = globalNavigatorKey.currentState?.context;
+        AppSnackbar.showSnackbarSuccess(
+          context != null && context.mounted ? context.l10n.appDeletedSuccessfully : 'App deleted successfully',
+        );
         notifyListeners();
       } else {
         print("Warning: Tried to delete app $appId but it wasn't found in the 'apps' list.");
       }
     } else {
-      AppSnackbar.showSnackbarError('Failed to delete app. Please try again later.');
+      final context = globalNavigatorKey.currentState?.context;
+      AppSnackbar.showSnackbarError(
+        context != null && context.mounted
+            ? context.l10n.appDeleteFailed
+            : 'Failed to delete app. Please try again later.',
+      );
     }
   }
 
@@ -387,7 +576,12 @@ class AppProvider extends BaseProvider {
       if (filteredIdx != -1) {
         filteredApps[filteredIdx] = apps[appIndex];
       }
-      AppSnackbar.showSnackbarSuccess('App visibility changed successfully. It may take a few minutes to reflect.');
+      final context = globalNavigatorKey.currentState?.context;
+      AppSnackbar.showSnackbarSuccess(
+        context != null
+            ? context.l10n.appVisibilityChangedSuccessfully
+            : 'App visibility changed successfully. It may take a few minutes to reflect.',
+      );
       notifyListeners();
     }
     // Refresh apps after a delay to get server-confirmed state
@@ -411,9 +605,30 @@ class AppProvider extends BaseProvider {
 
   Future<void> refreshAppsAfterChange() async {
     try {
-      debugPrint('Refreshing apps after installation/change...');
-      final freshApps = await retrieveApps();
-      apps = freshApps;
+      Logger.debug('Refreshing apps after installation/change...');
+      // Fetch grouped apps and user's enabled app IDs in parallel
+      final results = await Future.wait([
+        retrieveAppsGrouped(offset: 0, limit: 20, includeReviews: true),
+        getEnabledAppsServer(),
+      ]);
+      final groups = results[0] as List<Map<String, dynamic>>;
+      final enabledAppIds = (results[1] as List<String>).toSet();
+
+      groupedApps = groups;
+
+      // Flatten for search/filter views
+      final List<App> flat = [];
+      for (final g in groups) {
+        final List<App> data = (g['data'] as List<App>? ?? <App>[]);
+        flat.addAll(data);
+      }
+      apps = flat;
+
+      // Set enabled state from server
+      for (final app in apps) {
+        app.enabled = enabledAppIds.contains(app.id);
+      }
+
       appLoading = List.filled(apps.length, false, growable: true);
 
       // Refresh popular apps too
@@ -424,7 +639,7 @@ class AppProvider extends BaseProvider {
       updatePrefApps();
       notifyListeners();
     } catch (e) {
-      debugPrint('Error refreshing apps after change: $e');
+      Logger.debug('Error refreshing apps after change: $e');
     }
   }
 
@@ -456,7 +671,7 @@ class AppProvider extends BaseProvider {
       try {
         SharedPreferencesUtil().appsList = apps;
       } catch (e) {
-        debugPrint('Error updating preferences: $e');
+        Logger.debug('Error updating preferences: $e');
       }
     });
   }
@@ -532,6 +747,8 @@ class AppProvider extends BaseProvider {
           return (a, b) => (b.ratingAvg ?? -1.0).compareTo(a.ratingAvg ?? -1.0);
         case 'Lowest Rating':
           return (a, b) => (a.ratingAvg ?? -1.0).compareTo(b.ratingAvg ?? -1.0);
+        case 'Most Installs':
+          return (a, b) => b.installs.compareTo(a.installs);
         default:
           return null;
       }
@@ -566,15 +783,17 @@ class AppProvider extends BaseProvider {
     }
   }
 
-  Future<void> toggleApp(String appId, bool isEnabled, int? idx) async {
+  /// Enable/disable [appId] server-side, keeping prefs, local app state, and
+  /// failure UX (error dialog) in one owner. Returns whether the toggle stuck.
+  Future<bool> toggleApp(String appId, bool isEnabled, int? idx) async {
     int loadingIndex = -1;
     if (idx != null && idx >= 0 && idx < appLoading.length) {
       loadingIndex = idx;
-      if (appLoading[loadingIndex]) return;
+      if (appLoading[loadingIndex]) return false;
       appLoading[loadingIndex] = true;
       notifyListeners();
     } else if (idx != null) {
-      debugPrint("Warning: Invalid index $idx provided to toggleApp.");
+      Logger.debug("Warning: Invalid index $idx provided to toggleApp.");
     }
 
     var prefs = SharedPreferencesUtil();
@@ -585,24 +804,31 @@ class AppProvider extends BaseProvider {
       if (isEnabled) {
         success = await enableAppServer(appId);
         if (!success) {
-          errorMessage = 'Error activating the app. If this is an integration app, make sure the setup is completed.';
+          final context = globalNavigatorKey.currentState?.context;
+          errorMessage = context != null && context.mounted
+              ? context.l10n.errorActivatingAppIntegration
+              : 'Error activating the app. If this is an integration app, make sure the setup is completed.';
         } else {
-          MixpanelManager().appEnabled(appId);
+          PlatformManager.instance.analytics.appEnabled(appId);
         }
       } else {
         await disableAppServer(appId);
         success = true;
-        MixpanelManager().appDisabled(appId);
+        PlatformManager.instance.analytics.appDisabled(appId);
       }
     } catch (e) {
       print('Error toggling app $appId: $e');
       success = false;
-      errorMessage = 'An error occurred while updating the app status.';
+      final context = globalNavigatorKey.currentState?.context;
+      errorMessage = context != null && context.mounted
+          ? context.l10n.errorUpdatingAppStatus
+          : 'An error occurred while updating the app status.';
     }
 
     if (!success && errorMessage != null) {
+      final context = globalNavigatorKey.currentState?.context;
       AppDialog.show(
-        title: 'Error',
+        title: context != null && context.mounted ? context.l10n.error : 'Error',
         content: errorMessage,
         singleButton: true,
       );
@@ -628,7 +854,7 @@ class AppProvider extends BaseProvider {
         // Debounced preferences update to prevent database locks
         updatePrefApps();
       } else {
-        debugPrint("Error: Toggled app $appId not found in local 'apps' list after successful toggle.");
+        Logger.debug("Error: Toggled app $appId not found in local 'apps' list after successful toggle.");
       }
     }
 
@@ -642,6 +868,7 @@ class AppProvider extends BaseProvider {
     }
 
     notifyListeners();
+    return success;
   }
 
   // Performance optimization: Dispose method to clean up resources
